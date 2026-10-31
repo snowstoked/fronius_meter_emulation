@@ -302,8 +302,14 @@ mod tests {
             (231.0, 2.0, 400.0, 460.0)
         );
         assert!((a.power_factor - 0.87).abs() < 1e-6);
-        assert_eq!((b.voltage, b.active_power, b.power_factor < 0.0), (232.0, -100.0, true));
-        assert_eq!((c.voltage, c.current, c.apparent_power), (233.0, 4.0, 900.0));
+        assert_eq!(
+            (b.voltage, b.active_power, b.power_factor < 0.0),
+            (232.0, -100.0, true)
+        );
+        assert_eq!(
+            (c.voltage, c.current, c.apparent_power),
+            (233.0, 4.0, 900.0)
+        );
         assert_eq!(all.frequency, Some(49.97));
         assert_eq!(all.energy, Some((12345.0, 678.0)));
     }
@@ -359,7 +365,10 @@ mod tests {
         let err = client.read_fast().await.unwrap_err();
         assert!(matches!(err, ReadError::Timeout), "{err:?}");
         assert!(started.elapsed() < IO_TIMEOUT + Duration::from_secs(1));
-        assert!(client.connection.is_none(), "stale connection must be dropped");
+        assert!(
+            client.connection.is_none(),
+            "stale connection must be dropped"
+        );
         // Back to normal: a fresh connection is made and the next read works
         shelly.set_behaviour(Behaviour::Normal);
         assert_eq!(
@@ -380,4 +389,3 @@ mod tests {
         );
     }
 }
-

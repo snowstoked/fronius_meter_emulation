@@ -45,7 +45,11 @@ fn env_bool_default_true(name: &str) -> bool {
 
 fn flag_default_true(value: Option<&str>) -> bool {
     !matches!(
-        value.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        value
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
         "false" | "0" | "no" | "off"
     )
 }
@@ -733,7 +737,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ha_unavailable_or_non_numeric_state_is_a_failure_with_zero_when_nothing_was_ever_read() {
+    async fn ha_unavailable_or_non_numeric_state_is_a_failure_with_zero_when_nothing_was_ever_read()
+    {
         let mut server = Server::new_async().await;
         let _i = sensor(&mut server, "sensor.import", "unavailable").await;
         let _e = sensor(&mut server, "sensor.export", "250").await;
@@ -846,7 +851,8 @@ mod tests {
         let mut server = Server::new_async().await;
         let _e = sensor(&mut server, "sensor.export", "0").await;
         let i = sensor(&mut server, "sensor.import", "400").await;
-        let mut ha = offset_for(&server, false).with_timing(Duration::from_millis(150), Duration::ZERO);
+        let mut ha =
+            offset_for(&server, false).with_timing(Duration::from_millis(150), Duration::ZERO);
         assert_eq!(ha.read().await.offset, 400.0);
         i.remove_async().await;
         assert_eq!(ha.read().await.offset, 400.0);
@@ -866,7 +872,8 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        let mut ha = offset_for(&server, false).with_timing(Duration::from_secs(60), Duration::from_secs(60));
+        let mut ha = offset_for(&server, false)
+            .with_timing(Duration::from_secs(60), Duration::from_secs(60));
         for _ in 0..5 {
             ha.read().await;
         }
@@ -882,7 +889,8 @@ mod tests {
             .with_status(500)
             .create_async()
             .await;
-        let mut ha = offset_for(&server, false).with_timing(Duration::from_secs(60), Duration::from_millis(100));
+        let mut ha = offset_for(&server, false)
+            .with_timing(Duration::from_secs(60), Duration::from_millis(100));
         assert!(ha.read().await.degraded);
         bad.remove_async().await;
         let _good = sensor(&mut server, "sensor.import", "250").await;
@@ -907,7 +915,8 @@ mod tests {
             }
         });
         let mut ha = HaOffset::new(
-            HomeAssistantAPI::with_endpoint(url, "tok".into()).with_timeout(Duration::from_millis(300)),
+            HomeAssistantAPI::with_endpoint(url, "tok".into())
+                .with_timeout(Duration::from_millis(300)),
             "a".into(),
             "b".into(),
             false,
@@ -917,11 +926,18 @@ mod tests {
         let r = ha.read().await;
         let first = started.elapsed();
         assert!(r.degraded);
-        assert!(first < Duration::from_millis(550), "both sensors wait together: {first:?}");
+        assert!(
+            first < Duration::from_millis(550),
+            "both sensors wait together: {first:?}"
+        );
         // and then it leaves Home Assistant alone for the retry time: the next cycle is instant
         let started = Instant::now();
         ha.read().await;
-        assert!(started.elapsed() < Duration::from_millis(50), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "{:?}",
+            started.elapsed()
+        );
         task.abort();
     }
 
@@ -996,7 +1012,8 @@ mod tests {
         let mut server = Server::new_async().await;
         let _e = sensor(&mut server, "sensor.export", "0").await;
         let i = sensor(&mut server, "sensor.import", "1000").await;
-        let mut ha = offset_for(&server, true).with_timing(Duration::from_millis(100), Duration::ZERO);
+        let mut ha =
+            offset_for(&server, true).with_timing(Duration::from_millis(100), Duration::ZERO);
         for _ in 0..10 {
             ha.read().await;
         }

@@ -318,7 +318,14 @@ mod tests {
         let sum: f32 = (0..3).map(|i| p(&out, i).active_power).sum();
         assert_eq!(sum, 450.0 + 300.0);
         // the input is untouched
-        assert_eq!(three().phases, [Some(phase(300.0, 500.0)), Some(phase(-100.0, 200.0)), Some(phase(250.0, 250.0))]);
+        assert_eq!(
+            three().phases,
+            [
+                Some(phase(300.0, 500.0)),
+                Some(phase(-100.0, 200.0)),
+                Some(phase(250.0, 250.0))
+            ]
+        );
     }
 
     #[test]
@@ -376,8 +383,14 @@ mod tests {
 
     #[test]
     fn offset_on_idle_phases_creates_sensible_values() {
-        let idle = PhaseMeasurements { voltage: 230.0, ..Default::default() };
-        let m = Measurements { phases: [Some(idle); 3], ..Default::default() };
+        let idle = PhaseMeasurements {
+            voltage: 230.0,
+            ..Default::default()
+        };
+        let m = Measurements {
+            phases: [Some(idle); 3],
+            ..Default::default()
+        };
         let out = m.with_offset(-690.0);
         for i in 0..3 {
             let ph = p(&out, i);
@@ -396,7 +409,10 @@ mod tests {
         assert_eq!(three().with_offset(0.0), three());
         assert_eq!(three().with_offset(f32::NAN), three());
         // no connected phase at all
-        let dead = Measurements { phases: [Some(PhaseMeasurements::default()); 3], ..Default::default() };
+        let dead = Measurements {
+            phases: [Some(PhaseMeasurements::default()); 3],
+            ..Default::default()
+        };
         assert_eq!(dead.with_offset(100.0), dead);
     }
 

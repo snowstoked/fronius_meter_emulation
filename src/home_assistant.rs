@@ -54,10 +54,7 @@ impl HomeAssistantAPI {
         !self.endpoint_url.is_empty() && !self.auth_token.is_empty()
     }
 
-    pub async fn read_sensor_value(
-        &self,
-        sensor_path: &str,
-    ) -> Result<HASensor, anyhow::Error> {
+    pub async fn read_sensor_value(&self, sensor_path: &str) -> Result<HASensor, anyhow::Error> {
         if self.endpoint_url.is_empty() {
             anyhow::bail!("No HA connection");
         }
@@ -173,7 +170,11 @@ mod test_ha_wrapper {
         let started = std::time::Instant::now();
         let result = api.read_sensor_value("x").await;
         assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
         task.abort();
     }
 

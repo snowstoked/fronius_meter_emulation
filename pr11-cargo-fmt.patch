@@ -1,0 +1,464 @@
+From 58542ec9da6fb7e050e957d2a71948dea6703189 Mon Sep 17 00:00:00 2001
+From: Mario Anders <mail@mario-anders.de>
+Date: Sat, 31 Oct 2026 19:49:47 +0100
+Subject: [PATCH] Apply cargo fmt
+
+The Rust CI workflow runs `cargo fmt --check`. Formatting only, no
+functional change.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VY7BeUSuEcB6BF1BMwNgTu
+---
+ src/data_fetcher.rs      |  35 +++++++---
+ src/home_assistant.rs    |  11 +--
+ src/main.rs              | 145 ++++++++++++++++++++++++++++++++-------
+ src/meter_data.rs        |  24 +++++--
+ src/shelly_3em_client.rs |  16 +++--
+ 5 files changed, 184 insertions(+), 47 deletions(-)
+
+diff --git a/src/data_fetcher.rs b/src/data_fetcher.rs
+index 541cc45..b0847e2 100644
+--- a/src/data_fetcher.rs
++++ b/src/data_fetcher.rs
+@@ -45,7 +45,11 @@ fn env_bool_default_true(name: &str) -> bool {
+ 
+ fn flag_default_true(value: Option<&str>) -> bool {
+     !matches!(
+-        value.unwrap_or_default().trim().to_ascii_lowercase().as_str(),
++        value
++            .unwrap_or_default()
++            .trim()
++            .to_ascii_lowercase()
++            .as_str(),
+         "false" | "0" | "no" | "off"
+     )
+ }
+@@ -733,7 +737,8 @@ mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn ha_unavailable_or_non_numeric_state_is_a_failure_with_zero_when_nothing_was_ever_read() {
++    async fn ha_unavailable_or_non_numeric_state_is_a_failure_with_zero_when_nothing_was_ever_read()
++    {
+         let mut server = Server::new_async().await;
+         let _i = sensor(&mut server, "sensor.import", "unavailable").await;
+         let _e = sensor(&mut server, "sensor.export", "250").await;
+@@ -846,7 +851,8 @@ mod tests {
+         let mut server = Server::new_async().await;
+         let _e = sensor(&mut server, "sensor.export", "0").await;
+         let i = sensor(&mut server, "sensor.import", "400").await;
+-        let mut ha = offset_for(&server, false).with_timing(Duration::from_millis(150), Duration::ZERO);
++        let mut ha =
++            offset_for(&server, false).with_timing(Duration::from_millis(150), Duration::ZERO);
+         assert_eq!(ha.read().await.offset, 400.0);
+         i.remove_async().await;
+         assert_eq!(ha.read().await.offset, 400.0);
+@@ -866,7 +872,8 @@ mod tests {
+             .expect(1)
+             .create_async()
+             .await;
+-        let mut ha = offset_for(&server, false).with_timing(Duration::from_secs(60), Duration::from_secs(60));
++        let mut ha = offset_for(&server, false)
++            .with_timing(Duration::from_secs(60), Duration::from_secs(60));
+         for _ in 0..5 {
+             ha.read().await;
+         }
+@@ -882,7 +889,8 @@ mod tests {
+             .with_status(500)
+             .create_async()
+             .await;
+-        let mut ha = offset_for(&server, false).with_timing(Duration::from_secs(60), Duration::from_millis(100));
++        let mut ha = offset_for(&server, false)
++            .with_timing(Duration::from_secs(60), Duration::from_millis(100));
+         assert!(ha.read().await.degraded);
+         bad.remove_async().await;
+         let _good = sensor(&mut server, "sensor.import", "250").await;
+@@ -907,7 +915,8 @@ mod tests {
+             }
+         });
+         let mut ha = HaOffset::new(
+-            HomeAssistantAPI::with_endpoint(url, "tok".into()).with_timeout(Duration::from_millis(300)),
++            HomeAssistantAPI::with_endpoint(url, "tok".into())
++                .with_timeout(Duration::from_millis(300)),
+             "a".into(),
+             "b".into(),
+             false,
+@@ -917,11 +926,18 @@ mod tests {
+         let r = ha.read().await;
+         let first = started.elapsed();
+         assert!(r.degraded);
+-        assert!(first < Duration::from_millis(550), "both sensors wait together: {first:?}");
++        assert!(
++            first < Duration::from_millis(550),
++            "both sensors wait together: {first:?}"
++        );
+         // and then it leaves Home Assistant alone for the retry time: the next cycle is instant
+         let started = Instant::now();
+         ha.read().await;
+-        assert!(started.elapsed() < Duration::from_millis(50), "{:?}", started.elapsed());
++        assert!(
++            started.elapsed() < Duration::from_millis(50),
++            "{:?}",
++            started.elapsed()
++        );
+         task.abort();
+     }
+ 
+@@ -996,7 +1012,8 @@ mod tests {
+         let mut server = Server::new_async().await;
+         let _e = sensor(&mut server, "sensor.export", "0").await;
+         let i = sensor(&mut server, "sensor.import", "1000").await;
+-        let mut ha = offset_for(&server, true).with_timing(Duration::from_millis(100), Duration::ZERO);
++        let mut ha =
++            offset_for(&server, true).with_timing(Duration::from_millis(100), Duration::ZERO);
+         for _ in 0..10 {
+             ha.read().await;
+         }
+diff --git a/src/home_assistant.rs b/src/home_assistant.rs
+index f47e9c2..dd38e02 100644
+--- a/src/home_assistant.rs
++++ b/src/home_assistant.rs
+@@ -54,10 +54,7 @@ impl HomeAssistantAPI {
+         !self.endpoint_url.is_empty() && !self.auth_token.is_empty()
+     }
+ 
+-    pub async fn read_sensor_value(
+-        &self,
+-        sensor_path: &str,
+-    ) -> Result<HASensor, anyhow::Error> {
++    pub async fn read_sensor_value(&self, sensor_path: &str) -> Result<HASensor, anyhow::Error> {
+         if self.endpoint_url.is_empty() {
+             anyhow::bail!("No HA connection");
+         }
+@@ -173,7 +170,11 @@ mod test_ha_wrapper {
+         let started = std::time::Instant::now();
+         let result = api.read_sensor_value("x").await;
+         assert!(result.is_err());
+-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
++        assert!(
++            started.elapsed() < Duration::from_secs(2),
++            "{:?}",
++            started.elapsed()
++        );
+         task.abort();
+     }
+ 
+diff --git a/src/main.rs b/src/main.rs
+index 1d5152d..0951101 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -220,10 +220,20 @@ mod system_tests {
+     async fn home_assistant_offset_can_be_limited_to_the_total() {
+         let mut ha = mockito::Server::new_async().await;
+         let body = |s: &str| {
+-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
++            format!(
++                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
++            )
+         };
+-        let _i = ha.mock("GET", "/api/states/in").with_body(body("300")).create_async().await;
+-        let _e = ha.mock("GET", "/api/states/out").with_body(body("100")).create_async().await;
++        let _i = ha
++            .mock("GET", "/api/states/in")
++            .with_body(body("300"))
++            .create_async()
++            .await;
++        let _e = ha
++            .mock("GET", "/api/states/out")
++            .with_body(body("100"))
++            .create_async()
++            .await;
+         let url = ha.url();
+         let mut sys = start(
+             &[
+@@ -245,10 +255,20 @@ mod system_tests {
+     async fn home_assistant_offset_with_inverted_shelly() {
+         let mut ha = mockito::Server::new_async().await;
+         let body = |s: &str| {
+-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
++            format!(
++                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
++            )
+         };
+-        let _i = ha.mock("GET", "/api/states/in").with_body(body("50")).create_async().await;
+-        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
++        let _i = ha
++            .mock("GET", "/api/states/in")
++            .with_body(body("50"))
++            .create_async()
++            .await;
++        let _e = ha
++            .mock("GET", "/api/states/out")
++            .with_body(body("0"))
++            .create_async()
++            .await;
+         let url = ha.url();
+         let mut sys = start(
+             &[
+@@ -270,7 +290,11 @@ mod system_tests {
+     #[tokio::test]
+     async fn broken_home_assistant_does_not_disturb_the_meter() {
+         let mut ha = mockito::Server::new_async().await;
+-        let _any = ha.mock("GET", mockito::Matcher::Any).with_status(500).create_async().await;
++        let _any = ha
++            .mock("GET", mockito::Matcher::Any)
++            .with_status(500)
++            .create_async()
++            .await;
+         let url = ha.url();
+         let mut sys = start(
+             &[
+@@ -289,10 +313,20 @@ mod system_tests {
+     async fn smoothed_offset_applies_from_the_first_sample() {
+         let mut ha = mockito::Server::new_async().await;
+         let body = |s: &str| {
+-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
++            format!(
++                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
++            )
+         };
+-        let _i = ha.mock("GET", "/api/states/in").with_body(body("1000")).create_async().await;
+-        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
++        let _i = ha
++            .mock("GET", "/api/states/in")
++            .with_body(body("1000"))
++            .create_async()
++            .await;
++        let _e = ha
++            .mock("GET", "/api/states/out")
++            .with_body(body("0"))
++            .create_async()
++            .await;
+         let url = ha.url();
+         let mut sys = start(
+             &[
+@@ -336,17 +370,31 @@ mod system_tests {
+         let changed = Instant::now();
+         sys.shelly.set_total_power(-250.0);
+         sys.wait_for(|b| total(b) == -250.0).await;
+-        assert!(changed.elapsed() < Duration::from_secs(2), "{:?}", changed.elapsed());
++        assert!(
++            changed.elapsed() < Duration::from_secs(2),
++            "{:?}",
++            changed.elapsed()
++        );
+     }
+ 
+     #[tokio::test]
+     async fn home_assistant_going_away_keeps_the_last_offset_for_a_while() {
+         let mut ha = mockito::Server::new_async().await;
+         let body = |s: &str| {
+-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
++            format!(
++                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
++            )
+         };
+-        let i = ha.mock("GET", "/api/states/in").with_body(body("200")).create_async().await;
+-        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
++        let i = ha
++            .mock("GET", "/api/states/in")
++            .with_body(body("200"))
++            .create_async()
++            .await;
++        let _e = ha
++            .mock("GET", "/api/states/out")
++            .with_body(body("0"))
++            .create_async()
++            .await;
+         let url = ha.url();
+         let mut sys = start(
+             &[
+@@ -370,10 +418,20 @@ mod system_tests {
+     async fn home_assistant_offset_falls_back_to_zero_when_the_value_is_too_old() {
+         let mut ha = mockito::Server::new_async().await;
+         let body = |s: &str| {
+-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
++            format!(
++                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
++            )
+         };
+-        let i = ha.mock("GET", "/api/states/in").with_body(body("200")).create_async().await;
+-        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
++        let i = ha
++            .mock("GET", "/api/states/in")
++            .with_body(body("200"))
++            .create_async()
++            .await;
++        let _e = ha
++            .mock("GET", "/api/states/out")
++            .with_body(body("0"))
++            .create_async()
++            .await;
+         let url = ha.url();
+         let mut sys = start(
+             &[
+@@ -396,26 +454,59 @@ mod system_tests {
+     async fn each_unit_id_sees_its_own_serial() {
+         let mut sys = start(&[], 2).await;
+         let serial = |regs: Vec<u16>| -> String {
+-            regs.into_iter().filter(|c| *c != 0).map(|c| c as u8 as char).collect()
++            regs.into_iter()
++                .filter(|c| *c != 0)
++                .map(|c| c as u8 as char)
++                .collect()
+         };
+-        let id = sys.inverter.read_holding_registers(40052, 16).await.unwrap().unwrap();
++        let id = sys
++            .inverter
++            .read_holding_registers(40052, 16)
++            .await
++            .unwrap()
++            .unwrap();
+         assert_eq!(serial(id), "00000002");
+         let mut other = tcp::connect_slave(sys.addr, Slave(7)).await.unwrap();
+-        let id = other.read_holding_registers(40052, 16).await.unwrap().unwrap();
++        let id = other
++            .read_holding_registers(40052, 16)
++            .await
++            .unwrap()
++            .unwrap();
+         assert_eq!(serial(id), "00000007");
+     }
+ 
+     #[tokio::test]
+     async fn sunspec_identity_and_discovery_reads_work() {
+         let mut sys = start(&[], 1).await;
+-        let marker = sys.inverter.read_holding_registers(40000, 2).await.unwrap().unwrap();
++        let marker = sys
++            .inverter
++            .read_holding_registers(40000, 2)
++            .await
++            .unwrap()
++            .unwrap();
+         assert_eq!(marker, vec![0x5375, 0x6e53]); // "SunS"
+-        let model = sys.inverter.read_holding_registers(40069, 2).await.unwrap().unwrap();
++        let model = sys
++            .inverter
++            .read_holding_registers(40069, 2)
++            .await
++            .unwrap()
++            .unwrap();
+         assert_eq!(model, vec![213, 124]);
+-        let end = sys.inverter.read_holding_registers(40195, 2).await.unwrap().unwrap();
++        let end = sys
++            .inverter
++            .read_holding_registers(40195, 2)
++            .await
++            .unwrap()
++            .unwrap();
+         assert_eq!(end, vec![0xFFFF, 0]);
+         // Input registers answer too (Fronius uses both)
+-        assert!(sys.inverter.read_input_registers(40071, 2).await.unwrap().is_ok());
++        assert!(
++            sys.inverter
++                .read_input_registers(40071, 2)
++                .await
++                .unwrap()
++                .is_ok()
++        );
+     }
+ 
+     #[tokio::test]
+@@ -432,7 +523,11 @@ mod system_tests {
+         let mut sys = start(&[], 1).await;
+         let mut second = tcp::connect_slave(sys.addr, Slave(1)).await.unwrap();
+         sys.wait_for(|b| total(b) == 500.0).await;
+-        let b = second.read_holding_registers(40071, 58).await.unwrap().unwrap();
++        let b = second
++            .read_holding_registers(40071, 58)
++            .await
++            .unwrap()
++            .unwrap();
+         assert_eq!(total(&b), 500.0);
+     }
+ }
+diff --git a/src/meter_data.rs b/src/meter_data.rs
+index c4547db..5620ec6 100644
+--- a/src/meter_data.rs
++++ b/src/meter_data.rs
+@@ -318,7 +318,14 @@ mod tests {
+         let sum: f32 = (0..3).map(|i| p(&out, i).active_power).sum();
+         assert_eq!(sum, 450.0 + 300.0);
+         // the input is untouched
+-        assert_eq!(three().phases, [Some(phase(300.0, 500.0)), Some(phase(-100.0, 200.0)), Some(phase(250.0, 250.0))]);
++        assert_eq!(
++            three().phases,
++            [
++                Some(phase(300.0, 500.0)),
++                Some(phase(-100.0, 200.0)),
++                Some(phase(250.0, 250.0))
++            ]
++        );
+     }
+ 
+     #[test]
+@@ -376,8 +383,14 @@ mod tests {
+ 
+     #[test]
+     fn offset_on_idle_phases_creates_sensible_values() {
+-        let idle = PhaseMeasurements { voltage: 230.0, ..Default::default() };
+-        let m = Measurements { phases: [Some(idle); 3], ..Default::default() };
++        let idle = PhaseMeasurements {
++            voltage: 230.0,
++            ..Default::default()
++        };
++        let m = Measurements {
++            phases: [Some(idle); 3],
++            ..Default::default()
++        };
+         let out = m.with_offset(-690.0);
+         for i in 0..3 {
+             let ph = p(&out, i);
+@@ -396,7 +409,10 @@ mod tests {
+         assert_eq!(three().with_offset(0.0), three());
+         assert_eq!(three().with_offset(f32::NAN), three());
+         // no connected phase at all
+-        let dead = Measurements { phases: [Some(PhaseMeasurements::default()); 3], ..Default::default() };
++        let dead = Measurements {
++            phases: [Some(PhaseMeasurements::default()); 3],
++            ..Default::default()
++        };
+         assert_eq!(dead.with_offset(100.0), dead);
+     }
+ 
+diff --git a/src/shelly_3em_client.rs b/src/shelly_3em_client.rs
+index 13b5ae1..e897397 100644
+--- a/src/shelly_3em_client.rs
++++ b/src/shelly_3em_client.rs
+@@ -302,8 +302,14 @@ mod tests {
+             (231.0, 2.0, 400.0, 460.0)
+         );
+         assert!((a.power_factor - 0.87).abs() < 1e-6);
+-        assert_eq!((b.voltage, b.active_power, b.power_factor < 0.0), (232.0, -100.0, true));
+-        assert_eq!((c.voltage, c.current, c.apparent_power), (233.0, 4.0, 900.0));
++        assert_eq!(
++            (b.voltage, b.active_power, b.power_factor < 0.0),
++            (232.0, -100.0, true)
++        );
++        assert_eq!(
++            (c.voltage, c.current, c.apparent_power),
++            (233.0, 4.0, 900.0)
++        );
+         assert_eq!(all.frequency, Some(49.97));
+         assert_eq!(all.energy, Some((12345.0, 678.0)));
+     }
+@@ -359,7 +365,10 @@ mod tests {
+         let err = client.read_fast().await.unwrap_err();
+         assert!(matches!(err, ReadError::Timeout), "{err:?}");
+         assert!(started.elapsed() < IO_TIMEOUT + Duration::from_secs(1));
+-        assert!(client.connection.is_none(), "stale connection must be dropped");
++        assert!(
++            client.connection.is_none(),
++            "stale connection must be dropped"
++        );
+         // Back to normal: a fresh connection is made and the next read works
+         shelly.set_behaviour(Behaviour::Normal);
+         assert_eq!(
+@@ -380,4 +389,3 @@ mod tests {
+         );
+     }
+ }
+-
+-- 
+2.43.0
+

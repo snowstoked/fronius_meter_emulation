@@ -220,10 +220,20 @@ mod system_tests {
     async fn home_assistant_offset_can_be_limited_to_the_total() {
         let mut ha = mockito::Server::new_async().await;
         let body = |s: &str| {
-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
+            format!(
+                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
+            )
         };
-        let _i = ha.mock("GET", "/api/states/in").with_body(body("300")).create_async().await;
-        let _e = ha.mock("GET", "/api/states/out").with_body(body("100")).create_async().await;
+        let _i = ha
+            .mock("GET", "/api/states/in")
+            .with_body(body("300"))
+            .create_async()
+            .await;
+        let _e = ha
+            .mock("GET", "/api/states/out")
+            .with_body(body("100"))
+            .create_async()
+            .await;
         let url = ha.url();
         let mut sys = start(
             &[
@@ -245,10 +255,20 @@ mod system_tests {
     async fn home_assistant_offset_with_inverted_shelly() {
         let mut ha = mockito::Server::new_async().await;
         let body = |s: &str| {
-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
+            format!(
+                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
+            )
         };
-        let _i = ha.mock("GET", "/api/states/in").with_body(body("50")).create_async().await;
-        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
+        let _i = ha
+            .mock("GET", "/api/states/in")
+            .with_body(body("50"))
+            .create_async()
+            .await;
+        let _e = ha
+            .mock("GET", "/api/states/out")
+            .with_body(body("0"))
+            .create_async()
+            .await;
         let url = ha.url();
         let mut sys = start(
             &[
@@ -270,7 +290,11 @@ mod system_tests {
     #[tokio::test]
     async fn broken_home_assistant_does_not_disturb_the_meter() {
         let mut ha = mockito::Server::new_async().await;
-        let _any = ha.mock("GET", mockito::Matcher::Any).with_status(500).create_async().await;
+        let _any = ha
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(500)
+            .create_async()
+            .await;
         let url = ha.url();
         let mut sys = start(
             &[
@@ -289,10 +313,20 @@ mod system_tests {
     async fn smoothed_offset_applies_from_the_first_sample() {
         let mut ha = mockito::Server::new_async().await;
         let body = |s: &str| {
-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
+            format!(
+                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
+            )
         };
-        let _i = ha.mock("GET", "/api/states/in").with_body(body("1000")).create_async().await;
-        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
+        let _i = ha
+            .mock("GET", "/api/states/in")
+            .with_body(body("1000"))
+            .create_async()
+            .await;
+        let _e = ha
+            .mock("GET", "/api/states/out")
+            .with_body(body("0"))
+            .create_async()
+            .await;
         let url = ha.url();
         let mut sys = start(
             &[
@@ -336,17 +370,31 @@ mod system_tests {
         let changed = Instant::now();
         sys.shelly.set_total_power(-250.0);
         sys.wait_for(|b| total(b) == -250.0).await;
-        assert!(changed.elapsed() < Duration::from_secs(2), "{:?}", changed.elapsed());
+        assert!(
+            changed.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            changed.elapsed()
+        );
     }
 
     #[tokio::test]
     async fn home_assistant_going_away_keeps_the_last_offset_for_a_while() {
         let mut ha = mockito::Server::new_async().await;
         let body = |s: &str| {
-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
+            format!(
+                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
+            )
         };
-        let i = ha.mock("GET", "/api/states/in").with_body(body("200")).create_async().await;
-        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
+        let i = ha
+            .mock("GET", "/api/states/in")
+            .with_body(body("200"))
+            .create_async()
+            .await;
+        let _e = ha
+            .mock("GET", "/api/states/out")
+            .with_body(body("0"))
+            .create_async()
+            .await;
         let url = ha.url();
         let mut sys = start(
             &[
@@ -370,10 +418,20 @@ mod system_tests {
     async fn home_assistant_offset_falls_back_to_zero_when_the_value_is_too_old() {
         let mut ha = mockito::Server::new_async().await;
         let body = |s: &str| {
-            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
+            format!(
+                r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
+            )
         };
-        let i = ha.mock("GET", "/api/states/in").with_body(body("200")).create_async().await;
-        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
+        let i = ha
+            .mock("GET", "/api/states/in")
+            .with_body(body("200"))
+            .create_async()
+            .await;
+        let _e = ha
+            .mock("GET", "/api/states/out")
+            .with_body(body("0"))
+            .create_async()
+            .await;
         let url = ha.url();
         let mut sys = start(
             &[
@@ -396,26 +454,59 @@ mod system_tests {
     async fn each_unit_id_sees_its_own_serial() {
         let mut sys = start(&[], 2).await;
         let serial = |regs: Vec<u16>| -> String {
-            regs.into_iter().filter(|c| *c != 0).map(|c| c as u8 as char).collect()
+            regs.into_iter()
+                .filter(|c| *c != 0)
+                .map(|c| c as u8 as char)
+                .collect()
         };
-        let id = sys.inverter.read_holding_registers(40052, 16).await.unwrap().unwrap();
+        let id = sys
+            .inverter
+            .read_holding_registers(40052, 16)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(serial(id), "00000002");
         let mut other = tcp::connect_slave(sys.addr, Slave(7)).await.unwrap();
-        let id = other.read_holding_registers(40052, 16).await.unwrap().unwrap();
+        let id = other
+            .read_holding_registers(40052, 16)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(serial(id), "00000007");
     }
 
     #[tokio::test]
     async fn sunspec_identity_and_discovery_reads_work() {
         let mut sys = start(&[], 1).await;
-        let marker = sys.inverter.read_holding_registers(40000, 2).await.unwrap().unwrap();
+        let marker = sys
+            .inverter
+            .read_holding_registers(40000, 2)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(marker, vec![0x5375, 0x6e53]); // "SunS"
-        let model = sys.inverter.read_holding_registers(40069, 2).await.unwrap().unwrap();
+        let model = sys
+            .inverter
+            .read_holding_registers(40069, 2)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(model, vec![213, 124]);
-        let end = sys.inverter.read_holding_registers(40195, 2).await.unwrap().unwrap();
+        let end = sys
+            .inverter
+            .read_holding_registers(40195, 2)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(end, vec![0xFFFF, 0]);
         // Input registers answer too (Fronius uses both)
-        assert!(sys.inverter.read_input_registers(40071, 2).await.unwrap().is_ok());
+        assert!(
+            sys.inverter
+                .read_input_registers(40071, 2)
+                .await
+                .unwrap()
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -432,7 +523,11 @@ mod system_tests {
         let mut sys = start(&[], 1).await;
         let mut second = tcp::connect_slave(sys.addr, Slave(1)).await.unwrap();
         sys.wait_for(|b| total(b) == 500.0).await;
-        let b = second.read_holding_registers(40071, 58).await.unwrap().unwrap();
+        let b = second
+            .read_holding_registers(40071, 58)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(total(&b), 500.0);
     }
 }
