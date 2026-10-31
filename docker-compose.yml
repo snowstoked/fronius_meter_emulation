@@ -9,6 +9,10 @@ services:
       - HA_URL=http://192.168.0.2:8123
       - HA_TOKEN=your_long_lived_access_token
       - SHELLY_MODBUS=192.168.0.3:502
+      # - SHELLY_REST=192.168.0.3  # read over HTTP instead of modbus
+      # - SHELLY_INVERT=true  # flip power direction
+      # - FRONIUS_SERIAL=00000002  # default: the Modbus address the inverter uses
+      # - FRONIUS_DEBUG=true
       - HA_EXTRA_IMPORT=sensor.fronius_solar_extra_import
       - HA_EXTRA_EXPORT=sensor.fronius_solar_extra_export
       - FRONIUS_MODBUS_BIND=0.0.0.0:1502

@@ -4,14 +4,21 @@ use std::{env, net::SocketAddr};
 use tokio::net::TcpListener;
 use tokio_modbus::server::tcp::{Server, accept_tcp_connection};
 mod data_fetcher;
+mod debug;
 mod home_assistant;
+mod meter_data;
 mod rolling_average;
 mod shelly_3em_client;
+mod shelly_rest_client;
 mod smart_meter_emulator;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    debug::init();
     tracing_subscriber::fmt::init();
+    if debug::enabled() {
+        println!("Debug logging enabled (FRONIUS_DEBUG)");
+    }
 
     let socket_addr = env::var("FRONIUS_MODBUS_BIND")
         .unwrap_or("0.0.0.0:1502".to_string())
