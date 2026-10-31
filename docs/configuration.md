@@ -118,9 +118,30 @@ of 1000 W and a virtual import of 400 W, a net shift of 600 W of export is added
 | `HA_TOKEN` | | Long-lived access token. |
 | `HA_EXTRA_IMPORT` | | Entity whose value is added as import. |
 | `HA_EXTRA_EXPORT` | | Entity whose value is added as export. |
-| `HA_SMOOTH` | `false` | Average the offset over the last 10 samples. |
+| `HA_SMOOTH` | `false` | Average the offset over the last 10 samples. The average covers the samples there are while the window fills, so there is no dead time after start-up. |
+| `HA_OFFSET_PER_PHASE` | `true` | Spread the offset equally over the connected phases (see below). `false` adds it to the total power only. |
+| `HA_TIMEOUT_MS` | `2000` | Time limit of one request to Home Assistant (at least 100). |
+| `HA_RETRY_S` | `5` | After a failed read, a sensor is not asked again for this long. |
+| `HA_MAX_STALE_S` | `30` | How long the last good value of a sensor is kept while it can't be read. After that it counts as 0 W. |
 
-The offset is only added to the total power, not to the phase values.
+**Per phase.** The inverter does not only look at the total power, it also gets the power, current and power factor
+of each phase. With `HA_OFFSET_PER_PHASE=true` the offset is divided equally between the phases that are connected
+(voltage above 1 V; a single-phase device gets all of it on its one phase). The reactive power of each phase stays as
+measured, apparent power, power factor and current are recalculated from the new active power, so the three phases
+always add up to the total. As long as the Shelly has not delivered a complete set of phases, only the total is shifted.
+
+**When Home Assistant has problems.** A sensor counts as failed if the request fails, runs into the time limit,
+answers with an error, or if its state is not a number (`unavailable`, `unknown`, empty, `nan`, `inf`).
+
+- The last good value is kept for `HA_MAX_STALE_S` seconds, so a short hiccup doesn't make the offset jump to 0 W.
+  Afterwards the sensor counts as 0 W.
+- A failed sensor is only asked again every `HA_RETRY_S` seconds. An unreachable Home Assistant therefore costs one
+  time limit per retry, not one per cycle, and the power reading from the Shelly is not slowed down.
+- With `HA_SMOOTH`, a failed read is never averaged in as 0 W. If all sensors are gone for longer than
+  `HA_MAX_STALE_S`, the average starts over when they come back.
+- The first failure of a sensor, the moment its value is given up, and its recovery are logged once as warnings
+  (`Home Assistant sensor … can't be read`, `… counting it as 0 W`, `… is readable again`), not every cycle.
+- A sensor name that is left empty is not used and not requested.
 
 ## Logging and failure behaviour
 

@@ -43,13 +43,19 @@ impl RollingAverage {
     }
 
     /// Returns the current average without adding a new value.
+    /// While the window is still filling up this is the average of the values seen so far.
     /// Returns 0.0 if no values have been added yet.
     pub fn average(&self) -> f32 {
-        if self.count != WINDOW_SIZE {
+        if self.count == 0 {
             0.0
         } else {
             self.sum / self.count as f32
         }
+    }
+
+    /// Forget everything, as if freshly created
+    pub fn reset(&mut self) {
+        *self = Self::new();
     }
 }
 
@@ -72,10 +78,10 @@ mod tests {
     #[test]
     fn test_add_single_value() {
         let mut avg = RollingAverage::new();
-        // Before window is full, average returns 0.0
+        // Before the window is full, the average is over the values seen so far
         let result = avg.add(5.0);
-        assert_eq!(result, 0.0);
-        assert_eq!(avg.average(), 0.0);
+        assert_eq!(result, 5.0);
+        assert_eq!(avg.average(), 5.0);
 
         // Fill the window completely with 5.0s
         for _ in 1..WINDOW_SIZE {
@@ -90,9 +96,9 @@ mod tests {
         avg.add(1.0);
         avg.add(2.0);
         let result = avg.add(3.0);
-        // Window not full yet, so average returns 0.0
-        assert_eq!(result, 0.0);
-        assert_eq!(avg.average(), 0.0);
+        // Window not full yet: average of the three values
+        assert_eq!(result, 2.0);
+        assert_eq!(avg.average(), 2.0);
     }
 
     #[test]
@@ -125,14 +131,32 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_window_returns_zero() {
+    fn test_partial_window_averages_what_it_has() {
         let mut avg = RollingAverage::new();
         avg.add(1.0);
         avg.add(2.0);
         avg.add(3.0);
 
-        // Window not full, so average returns 0.0
+        // Window not full: no zeros are assumed for the missing samples
+        assert_eq!(avg.average(), 2.0);
+    }
+
+    #[test]
+    fn test_partial_window_with_negative_values() {
+        let mut avg = RollingAverage::new();
+        assert_eq!(avg.add(-100.0), -100.0);
+        assert_eq!(avg.add(-300.0), -200.0);
+    }
+
+    #[test]
+    fn test_reset_forgets_everything() {
+        let mut avg = RollingAverage::new();
+        for _ in 0..WINDOW_SIZE + 3 {
+            avg.add(7.0);
+        }
+        avg.reset();
         assert_eq!(avg.average(), 0.0);
+        assert_eq!(avg.add(1.0), 1.0);
     }
 
     #[test]

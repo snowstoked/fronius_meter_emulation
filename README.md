@@ -97,6 +97,10 @@ FRONIUS_DEBUG # Verbose logging (true/false)
 HA_EXTRA_IMPORT # Home Assistant sensor that is added to import readings
 HA_EXTRA_EXPORT # Home Assistant sensor that is added to export readings
 HA_SMOOTH # Home Assistant smoothing enable disable (true/false)
+HA_OFFSET_PER_PHASE # Split the Home Assistant offset over the phases (default true), false = total power only
+HA_TIMEOUT_MS # Time limit of a Home Assistant request (default 2000)
+HA_RETRY_S # Wait before asking a failed Home Assistant sensor again (default 5)
+HA_MAX_STALE_S # How long the last Home Assistant value is kept when it can't be read (default 30)
 HA_URL # Home Assistant URL to connect to
 HA_TOKEN # Home Assistant token for authentication
 ```

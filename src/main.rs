@@ -69,6 +69,8 @@ mod system_tests {
     // SunSpec model 213 registers as the inverter reads them
     const TOTAL_POWER: u16 = 40097;
     const POWER_A: u16 = 40099;
+    const POWER_B: u16 = 40101;
+    const POWER_C: u16 = 40103;
     const VOLTAGE_A: u16 = 40081;
     const FREQUENCY: u16 = 40095;
 
@@ -176,7 +178,7 @@ mod system_tests {
     }
 
     #[tokio::test]
-    async fn home_assistant_offset_is_added_to_the_total_only() {
+    async fn home_assistant_offset_is_added_to_the_total_and_split_over_the_phases() {
         let mut ha = mockito::Server::new_async().await;
         let _i = ha
             .mock("GET", "/api/states/sensor.extra_in")
@@ -205,11 +207,38 @@ mod system_tests {
         let b = sys.wait_for(|b| f32_at(b, 40071, VOLTAGE_A) > 1.0).await;
         // 500 W from the Shelly + (300 - 100) W from Home Assistant
         assert_eq!(total(&b), 700.0);
-        // The phases are the Shelly's own
-        assert_eq!(f32_at(&b, 40071, POWER_A), 200.0);
+        // Each of the three phases carries a third of the 200 W
+        assert!((f32_at(&b, 40071, POWER_A) - (200.0 + 200.0 / 3.0)).abs() < 0.01);
+        assert!((f32_at(&b, 40071, POWER_B) - (150.0 + 200.0 / 3.0)).abs() < 0.01);
+        assert!((f32_at(&b, 40071, POWER_C) - (150.0 + 200.0 / 3.0)).abs() < 0.01);
         // And it follows the Shelly
         sys.shelly.set_total_power(-1000.0);
         sys.wait_for(|b| total(b) == -800.0).await;
+    }
+
+    #[tokio::test]
+    async fn home_assistant_offset_can_be_limited_to_the_total() {
+        let mut ha = mockito::Server::new_async().await;
+        let body = |s: &str| {
+            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
+        };
+        let _i = ha.mock("GET", "/api/states/in").with_body(body("300")).create_async().await;
+        let _e = ha.mock("GET", "/api/states/out").with_body(body("100")).create_async().await;
+        let url = ha.url();
+        let mut sys = start(
+            &[
+                ("HA_URL", url.as_str()),
+                ("HA_TOKEN", "t"),
+                ("HA_EXTRA_IMPORT", "in"),
+                ("HA_EXTRA_EXPORT", "out"),
+                ("HA_OFFSET_PER_PHASE", "false"),
+            ],
+            1,
+        )
+        .await;
+        let b = sys.wait_for(|b| f32_at(b, 40071, VOLTAGE_A) > 1.0).await;
+        assert_eq!(total(&b), 700.0);
+        assert_eq!(f32_at(&b, 40071, POWER_A), 200.0);
     }
 
     #[tokio::test]
@@ -235,7 +264,7 @@ mod system_tests {
         // Shelly +500 is flipped to -500, then the offset of +50 is added
         let b = sys.wait_for(|b| f32_at(b, 40071, VOLTAGE_A) > 1.0).await;
         assert_eq!(total(&b), -450.0);
-        assert_eq!(f32_at(&b, 40071, POWER_A), -200.0);
+        assert!((f32_at(&b, 40071, POWER_A) - (-200.0 + 50.0 / 3.0)).abs() < 0.01);
     }
 
     #[tokio::test]
@@ -257,7 +286,7 @@ mod system_tests {
     }
 
     #[tokio::test]
-    async fn smoothed_offset_applies_after_ten_samples() {
+    async fn smoothed_offset_applies_from_the_first_sample() {
         let mut ha = mockito::Server::new_async().await;
         let body = |s: &str| {
             format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
@@ -276,10 +305,91 @@ mod system_tests {
             1,
         )
         .await;
-        // Right after start the filter is not full: plain Shelly value
-        let first = sys.block().await;
-        assert!(total(&first) == 500.0 || total(&first) == 0.0, "{}", total(&first));
+        // No warm-up period: the first sample is already averaged over what there is, and Home Assistant is steady
         sys.wait_for(|b| total(b) == 1500.0).await;
+    }
+
+    #[tokio::test]
+    async fn hanging_home_assistant_does_not_stall_the_meter() {
+        // accepts connections and never answers
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let _held = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let mut sys = start(
+            &[
+                ("HA_URL", url.as_str()),
+                ("HA_TOKEN", "t"),
+                ("HA_EXTRA_IMPORT", "in"),
+                ("HA_EXTRA_EXPORT", "out"),
+                ("HA_TIMEOUT_MS", "300"),
+            ],
+            1,
+        )
+        .await;
+        sys.wait_for(|b| total(b) == 500.0).await;
+        // After the first failed attempt Home Assistant is left alone for a while, so changes arrive quickly
+        let changed = Instant::now();
+        sys.shelly.set_total_power(-250.0);
+        sys.wait_for(|b| total(b) == -250.0).await;
+        assert!(changed.elapsed() < Duration::from_secs(2), "{:?}", changed.elapsed());
+    }
+
+    #[tokio::test]
+    async fn home_assistant_going_away_keeps_the_last_offset_for_a_while() {
+        let mut ha = mockito::Server::new_async().await;
+        let body = |s: &str| {
+            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
+        };
+        let i = ha.mock("GET", "/api/states/in").with_body(body("200")).create_async().await;
+        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
+        let url = ha.url();
+        let mut sys = start(
+            &[
+                ("HA_URL", url.as_str()),
+                ("HA_TOKEN", "t"),
+                ("HA_EXTRA_IMPORT", "in"),
+                ("HA_EXTRA_EXPORT", "out"),
+                ("HA_RETRY_S", "0"),
+            ],
+            1,
+        )
+        .await;
+        sys.wait_for(|b| total(b) == 700.0).await;
+        i.remove_async().await; // mockito answers 501 from now on
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // still 500 + 200, not 500
+        assert_eq!(total(&sys.block().await), 700.0);
+    }
+
+    #[tokio::test]
+    async fn home_assistant_offset_falls_back_to_zero_when_the_value_is_too_old() {
+        let mut ha = mockito::Server::new_async().await;
+        let body = |s: &str| {
+            format!(r#"{{"entity_id":"a","state":"{s}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#)
+        };
+        let i = ha.mock("GET", "/api/states/in").with_body(body("200")).create_async().await;
+        let _e = ha.mock("GET", "/api/states/out").with_body(body("0")).create_async().await;
+        let url = ha.url();
+        let mut sys = start(
+            &[
+                ("HA_URL", url.as_str()),
+                ("HA_TOKEN", "t"),
+                ("HA_EXTRA_IMPORT", "in"),
+                ("HA_EXTRA_EXPORT", "out"),
+                ("HA_MAX_STALE_S", "0"),
+                ("HA_RETRY_S", "0"),
+            ],
+            1,
+        )
+        .await;
+        sys.wait_for(|b| total(b) == 700.0).await;
+        i.remove_async().await;
+        sys.wait_for(|b| total(b) == 500.0).await;
     }
 
     #[tokio::test]
