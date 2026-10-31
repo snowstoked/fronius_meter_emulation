@@ -9,9 +9,17 @@ pub struct HomeAssistantAPI {
 
 impl HomeAssistantAPI {
     pub fn new() -> Self {
+        Self::with_endpoint(
+            env::var("HA_URL").unwrap_or_default(),
+            env::var("HA_TOKEN").unwrap_or_default(),
+        )
+    }
+
+    /// Same as `new` but without reading the environment (used by tests)
+    pub fn with_endpoint(endpoint_url: String, auth_token: String) -> Self {
         Self {
-            endpoint_url: env::var("HA_URL").unwrap_or_default(),
-            auth_token: env::var("HA_TOKEN").unwrap_or_default(),
+            endpoint_url,
+            auth_token,
             client: reqwest::Client::new(),
         }
     }
@@ -56,7 +64,6 @@ pub struct HASensor {
 #[cfg(test)]
 mod test_ha_wrapper {
     use super::*;
-    use std::env;
 
     #[tokio::test]
     async fn test_home_assistant_api() {
@@ -81,15 +88,7 @@ mod test_ha_wrapper {
             )
             .create();
 
-        // Set environment variables for the test
-        unsafe {
-            env::set_var("HA_URL", server.url());
-            env::set_var("HA_TOKEN", "test_token");
-        }
-
-        // Create API instance and perform request
-
-        let mut api = HomeAssistantAPI::new();
+        let mut api = HomeAssistantAPI::with_endpoint(server.url(), "test_token".into());
         let result = api.read_sensor_value("sensor.temperature").await.unwrap();
 
         // Verify result
@@ -105,12 +104,7 @@ mod test_ha_wrapper {
 
     #[tokio::test]
     async fn test_home_assistant_api_no_connection() {
-        // Clear environment variables
-        unsafe {
-            env::remove_var("HA_URL");
-        }
-
-        let mut api = HomeAssistantAPI::new();
+        let mut api = HomeAssistantAPI::with_endpoint(String::new(), String::new());
         let result = api.read_sensor_value("sensor.temperature").await;
 
         assert!(result.is_err());

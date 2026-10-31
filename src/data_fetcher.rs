@@ -60,15 +60,18 @@ impl DataFetcher {
         if invert {
             println!("SHELLY_INVERT: power direction is flipped");
         }
-        let mut home_assistant_client = HomeAssistantAPI::new();
+        let mut ha = HaOffset::new(
+            HomeAssistantAPI::new(),
+            home_assistant_extra_import_sensor,
+            home_assistant_extra_export_sensor,
+            parse_bool_safe(env::var("HA_SMOOTH").ok()),
+        );
 
-        if !home_assistant_client.is_configured() {
+        if !ha.api.is_configured() {
             println!("Home assistant integration disabled")
         }
 
         println!("Running");
-        let should_smooth = parse_bool_safe(env::var("HA_SMOOTH").ok());
-        let mut filtered_ha_offset = RollingAverage::default();
         let mut interval = time::interval(poll_interval);
         // If something stalls we want to carry on from now, not fire a burst of catch-up reads at the Shelly
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -137,26 +140,11 @@ impl DataFetcher {
             let shelly_net_power = state
                 .total_active_power
                 .expect("fast read always provides power");
-            let (ha_import, ha_export, ha_offset) = if home_assistant_client.is_configured() {
-                let ha_import = Self::read_ha_sensor_or_null(
-                    &home_assistant_extra_import_sensor,
-                    &mut home_assistant_client,
-                )
-                .await;
-                let ha_export = Self::read_ha_sensor_or_null(
-                    &home_assistant_extra_export_sensor,
-                    &mut home_assistant_client,
-                )
-                .await;
-                let ha_offset = if should_smooth {
-                    filtered_ha_offset.add(ha_import - ha_export)
-                } else {
-                    ha_import - ha_export
-                };
-                (ha_import, ha_export, ha_offset)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
+            let HaReading {
+                import: ha_import,
+                export: ha_export,
+                offset: ha_offset,
+            } = ha.read().await;
             let summed_power = shelly_net_power + ha_offset;
 
             if let Some(previous) = last_net_power
@@ -180,19 +168,73 @@ impl DataFetcher {
                 .expect("Cant send readings to fake meter");
         }
     }
-    async fn read_ha_sensor_or_null(
-        sensor_name: &str,
-        home_assistant_client: &mut HomeAssistantAPI,
-    ) -> f32 {
-        let home_assistant_offset_str = home_assistant_client.read_sensor_value(sensor_name).await;
-        let ha_offset: f32 = match home_assistant_offset_str {
+}
+
+/// What Home Assistant contributed in one cycle
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HaReading {
+    pub import: f32,
+    pub export: f32,
+    /// `import - export` (smoothed if enabled); this is added to the Shelly's total power
+    pub offset: f32,
+}
+
+/// Extra consumption/production that the Shelly doesn't see, taken from two Home Assistant sensors.
+/// A sensor that can't be read (or isn't a number) counts as 0 W.
+pub struct HaOffset {
+    api: HomeAssistantAPI,
+    import_sensor: String,
+    export_sensor: String,
+    smooth: bool,
+    filter: RollingAverage,
+}
+
+impl HaOffset {
+    pub fn new(
+        api: HomeAssistantAPI,
+        import_sensor: String,
+        export_sensor: String,
+        smooth: bool,
+    ) -> Self {
+        Self {
+            api,
+            import_sensor,
+            export_sensor,
+            smooth,
+            filter: RollingAverage::default(),
+        }
+    }
+
+    pub async fn read(&mut self) -> HaReading {
+        if !self.api.is_configured() {
+            return HaReading {
+                import: 0.0,
+                export: 0.0,
+                offset: 0.0,
+            };
+        }
+        let import = Self::read_sensor_or_null(&self.import_sensor, &mut self.api).await;
+        let export = Self::read_sensor_or_null(&self.export_sensor, &mut self.api).await;
+        let offset = if self.smooth {
+            self.filter.add(import - export)
+        } else {
+            import - export
+        };
+        HaReading {
+            import,
+            export,
+            offset,
+        }
+    }
+
+    async fn read_sensor_or_null(sensor_name: &str, api: &mut HomeAssistantAPI) -> f32 {
+        match api.read_sensor_value(sensor_name).await {
             Ok(res) => res.state.parse().unwrap_or_default(),
             Err(e) => {
                 println!("Didn't read HA offset {e:?}");
                 0.0
             }
-        };
-        ha_offset
+        }
     }
 }
 
@@ -358,4 +400,279 @@ mod tests {
         assert_eq!(s.due_step(now + Duration::from_secs(5), 1), None);
         assert_eq!(s.due_step(now + Duration::from_secs(11), 1), Some(0));
     }
+
+    // ---- Home Assistant offset ----
+
+    use mockito::{Server, ServerGuard};
+
+    fn sensor_body(entity: &str, state: &str) -> String {
+        format!(
+            r#"{{"entity_id":"{entity}","state":"{state}","last_changed":"x","last_reported":"x","last_updated":"x"}}"#
+        )
+    }
+
+    async fn sensor(server: &mut ServerGuard, entity: &str, state: &str) -> mockito::Mock {
+        server
+            .mock("GET", format!("/api/states/{entity}").as_str())
+            .match_header("Authorization", "Bearer tok")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(sensor_body(entity, state))
+            .expect_at_least(0)
+            .create_async()
+            .await
+    }
+
+    fn offset_for(server: &ServerGuard, smooth: bool) -> HaOffset {
+        HaOffset::new(
+            HomeAssistantAPI::with_endpoint(server.url(), "tok".into()),
+            "sensor.import".into(),
+            "sensor.export".into(),
+            smooth,
+        )
+    }
+
+    #[tokio::test]
+    async fn ha_not_configured_gives_zero_and_no_requests() {
+        let mut ha = HaOffset::new(
+            HomeAssistantAPI::with_endpoint(String::new(), String::new()),
+            "sensor.import".into(),
+            "sensor.export".into(),
+            false,
+        );
+        let r = ha.read().await;
+        assert_eq!(r, HaReading { import: 0.0, export: 0.0, offset: 0.0 });
+        // Only one of the two set is still "not configured"
+        let mut ha = HaOffset::new(
+            HomeAssistantAPI::with_endpoint("http://x".into(), String::new()),
+            "a".into(),
+            "b".into(),
+            true,
+        );
+        assert_eq!(ha.read().await.offset, 0.0);
+    }
+
+    #[tokio::test]
+    async fn ha_offset_is_import_minus_export() {
+        let mut server = Server::new_async().await;
+        let _i = sensor(&mut server, "sensor.import", "300.5").await;
+        let _e = sensor(&mut server, "sensor.export", "100").await;
+        let r = offset_for(&server, false).read().await;
+        assert_eq!(r.import, 300.5);
+        assert_eq!(r.export, 100.0);
+        assert_eq!(r.offset, 200.5);
+    }
+
+    #[tokio::test]
+    async fn ha_export_larger_than_import_gives_negative_offset() {
+        let mut server = Server::new_async().await;
+        let _i = sensor(&mut server, "sensor.import", "0").await;
+        let _e = sensor(&mut server, "sensor.export", "1200").await;
+        assert_eq!(offset_for(&server, false).read().await.offset, -1200.0);
+    }
+
+    #[tokio::test]
+    async fn ha_sends_bearer_token_and_requests_both_sensors() {
+        let mut server = Server::new_async().await;
+        let i = server
+            .mock("GET", "/api/states/sensor.import")
+            .match_header("Authorization", "Bearer tok")
+            .with_body(sensor_body("sensor.import", "1"))
+            .expect(1)
+            .create_async()
+            .await;
+        let e = server
+            .mock("GET", "/api/states/sensor.export")
+            .match_header("Authorization", "Bearer tok")
+            .with_body(sensor_body("sensor.export", "1"))
+            .expect(1)
+            .create_async()
+            .await;
+        offset_for(&server, false).read().await;
+        i.assert_async().await;
+        e.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn ha_unavailable_or_non_numeric_state_counts_as_zero() {
+        let mut server = Server::new_async().await;
+        let _i = sensor(&mut server, "sensor.import", "unavailable").await;
+        let _e = sensor(&mut server, "sensor.export", "250").await;
+        let r = offset_for(&server, false).read().await;
+        assert_eq!(r.import, 0.0);
+        assert_eq!(r.offset, -250.0);
+        // "unknown", empty and garbage are the same
+        for state in ["unknown", "", "abc", "1,5"] {
+            let mut s = Server::new_async().await;
+            let _i = sensor(&mut s, "sensor.import", state).await;
+            let _e = sensor(&mut s, "sensor.export", "0").await;
+            assert_eq!(offset_for(&s, false).read().await.offset, 0.0, "{state:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ha_http_errors_and_bad_json_count_as_zero() {
+        let mut server = Server::new_async().await;
+        let _i = server
+            .mock("GET", "/api/states/sensor.import")
+            .with_status(401)
+            .with_body("{\"message\":\"401: Unauthorized\"}")
+            .create_async()
+            .await;
+        let _e = server
+            .mock("GET", "/api/states/sensor.export")
+            .with_status(200)
+            .with_body("not json")
+            .create_async()
+            .await;
+        let r = offset_for(&server, false).read().await;
+        assert_eq!((r.import, r.export, r.offset), (0.0, 0.0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn ha_unreachable_server_counts_as_zero() {
+        let url = {
+            let server = Server::new_async().await;
+            server.url()
+        }; // server dropped, port closed
+        let mut ha = HaOffset::new(
+            HomeAssistantAPI::with_endpoint(url, "tok".into()),
+            "sensor.import".into(),
+            "sensor.export".into(),
+            false,
+        );
+        assert_eq!(ha.read().await.offset, 0.0);
+    }
+
+    #[tokio::test]
+    async fn ha_one_sensor_failing_still_uses_the_other() {
+        let mut server = Server::new_async().await;
+        let _i = sensor(&mut server, "sensor.import", "400").await;
+        let _e = server
+            .mock("GET", "/api/states/sensor.export")
+            .with_status(500)
+            .create_async()
+            .await;
+        assert_eq!(offset_for(&server, false).read().await.offset, 400.0);
+    }
+
+    #[tokio::test]
+    async fn ha_without_smoothing_follows_every_change_at_once() {
+        let mut server = Server::new_async().await;
+        let _e = sensor(&mut server, "sensor.export", "0").await;
+        let i = sensor(&mut server, "sensor.import", "100").await;
+        let mut ha = offset_for(&server, false);
+        assert_eq!(ha.read().await.offset, 100.0);
+        i.remove_async().await;
+        let _i2 = sensor(&mut server, "sensor.import", "700").await;
+        assert_eq!(ha.read().await.offset, 700.0);
+    }
+
+    #[tokio::test]
+    async fn ha_smoothing_reports_zero_until_the_window_is_full_then_averages() {
+        let mut server = Server::new_async().await;
+        let _e = sensor(&mut server, "sensor.export", "0").await;
+        let _i = sensor(&mut server, "sensor.import", "100").await;
+        let mut ha = offset_for(&server, true);
+        // Documented behaviour of the window: nothing is applied for the first 9 samples
+        for n in 1..10 {
+            assert_eq!(ha.read().await.offset, 0.0, "sample {n}");
+        }
+        assert_eq!(ha.read().await.offset, 100.0);
+        assert_eq!(ha.read().await.offset, 100.0);
+    }
+
+    #[tokio::test]
+    async fn ha_smoothing_averages_over_ten_samples() {
+        let mut server = Server::new_async().await;
+        let _e = sensor(&mut server, "sensor.export", "0").await;
+        let i = sensor(&mut server, "sensor.import", "0").await;
+        let mut ha = offset_for(&server, true);
+        for _ in 0..10 {
+            ha.read().await;
+        }
+        i.remove_async().await;
+        let _i2 = sensor(&mut server, "sensor.import", "1000").await;
+        // One new sample of 1000 W among nine zeros: 100 W
+        let r = ha.read().await;
+        assert_eq!(r.import, 1000.0); // raw value is reported unsmoothed
+        assert!((r.offset - 100.0).abs() < 0.01, "{}", r.offset);
+        for _ in 0..8 {
+            ha.read().await;
+        }
+        assert!((ha.read().await.offset - 1000.0).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn ha_smoothing_counts_failed_reads_as_zero_samples() {
+        let mut server = Server::new_async().await;
+        let _e = sensor(&mut server, "sensor.export", "0").await;
+        let i = sensor(&mut server, "sensor.import", "100").await;
+        let mut ha = offset_for(&server, true);
+        for _ in 0..10 {
+            ha.read().await;
+        }
+        i.remove_async().await; // now 501 from mockito
+        let r = ha.read().await;
+        assert!((r.offset - 90.0).abs() < 0.01, "{}", r.offset);
+    }
+
+    // ---- offset applied to the meter registers ----
+
+    use crate::meter_data::PhaseMeasurements;
+
+    fn three_phases(w: f32) -> Measurements {
+        let p = PhaseMeasurements {
+            voltage: 230.0,
+            current: 1.0,
+            active_power: w,
+            apparent_power: w.abs() + 10.0,
+            power_factor: 0.9,
+        };
+        Measurements {
+            total_active_power: Some(w * 3.0),
+            phases: [Some(p); 3],
+            ..Default::default()
+        }
+    }
+
+    fn total_and_phase_a(readings: &[Readings]) -> (f32, f32) {
+        let total = readings
+            .iter()
+            .find_map(|r| match r {
+                Readings::TotalRealPower(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap();
+        let a = readings
+            .iter()
+            .find_map(|r| match r {
+                Readings::PhaseAWatts(v) => Some(*v),
+                _ => None,
+            })
+            .unwrap();
+        (total, a)
+    }
+
+    #[test]
+    fn ha_offset_changes_only_the_total_not_the_phases() {
+        // Documents the current behaviour: per-phase values are the Shelly's own
+        let m = three_phases(100.0);
+        let (total, a) = total_and_phase_a(&m.to_readings(300.0 + 500.0));
+        assert_eq!(total, 800.0);
+        assert_eq!(a, 100.0);
+    }
+
+    #[test]
+    fn ha_offset_is_added_after_the_shelly_value_is_inverted() {
+        // worker order: invert Shelly, then add the HA offset
+        let mut m = three_phases(100.0);
+        m.invert();
+        let shelly = m.total_active_power.unwrap();
+        assert_eq!(shelly, -300.0);
+        let (total, a) = total_and_phase_a(&m.to_readings(shelly + 50.0));
+        assert_eq!(total, -250.0);
+        assert_eq!(a, -100.0);
+    }
 }
+
