@@ -20,6 +20,9 @@ to read the Shelly. If both variables are set, `SHELLY_REST` is used.
 | `SHELLY_MODBUS` | | `ip:port` of the Shelly's Modbus TCP server, e.g. `192.168.1.5:502`. Modbus TCP has to be enabled in the Shelly's settings. |
 | `SHELLY_REST` | | Address of the Shelly for HTTP RPC ("REST") reads: `192.168.1.5`, `192.168.1.5:80` or a full `http://…` URL. |
 | `SHELLY_ID` | lowest id found | Component id to read if a device has several (e.g. channel 1 of a Pro 2PM). `SHELLY_EM_ID` is the old name and still works. Only used with `SHELLY_REST`. |
+| `SHELLY_USER` | `admin` | User name for HTTP basic authentication. Only used for Gen1 devices (Shelly 3EM, EM) with `SHELLY_REST`, and only if `SHELLY_PASSWORD` is set. |
+| `SHELLY_PASSWORD` | | Password for HTTP basic authentication of a Gen1 device. Leave empty if authentication is off. |
+| `SHELLY_FREQUENCY` | `50` | Grid frequency in Hz that is reported for devices that can't measure it (Gen1 energy meters). Accepts 40 to 70. |
 | `SHELLY_INVERT` | `false` | Flips the direction of power flow: the sign of all power values and power factors, and swaps import and export energy. Works for every source. See [Sign of the power](#sign-of-the-power). |
 
 ### Supported Shelly devices
@@ -33,20 +36,30 @@ it returns all values of one measurement together.
 | Shelly Pro 3EM | yes | yes | three phases | Both tested |
 | Shelly Pro 1PM | no | yes | one phase (A), phases B and C are 0 | REST tested |
 | Shelly Plus 1PM, Pro 2PM, Plus 2PM and other Gen2+ devices with power metering | no | yes | one phase (A) | Expected to work (same `Switch` component), not tested. Use `SHELLY_ID` to pick the channel of a multi-channel device. |
-| Gen1 devices (Shelly EM, 3EM) | | no | | Not supported (different API) |
+| Shelly 3EM (Gen1, `SHEM-3`) | no | yes (Gen1 API) | three phases, fixed frequency | Implemented from the Gen1 API documentation, not yet tested on a real device |
+| Shelly EM (Gen1, `SHEM`) | no | yes (Gen1 API) | two channels as phases A and B, phase C is 0, fixed frequency | Same as above |
+| Other Gen1 devices (1PM, Plug S, …) | no | no | | Not supported |
 | Devices that only have `em1:N` components (Pro EM-50, EM Gen3) | | no | | Not supported yet. The error message lists the components found. |
 
-How REST detects the device: the emulator asks `Shelly.GetStatus` once and looks at the components.
+How REST detects the device: the emulator asks `Shelly.GetStatus` once and looks at the components. If the Shelly
+answers that with `404 Not Found`, it has no RPC interface and is tried as a Gen1 energy meter (see below).
 
 | Component | Device type | Calls per poll | Energy counters |
 |---|---|---|---|
 | `em:N` | Energy meter (Pro 3EM) | `EM.GetStatus`: total power, all phases and frequency from one sample | `EMData.GetStatus`, at the slow interval |
 | `switch:N` | Relay with power metering (Pro 1PM, …) | `Switch.GetStatus`: power, voltage, current, frequency and energy | Included in every poll |
+| `emeters` in `/status` (Gen1) | Shelly 3EM, Shelly EM | `GET /status`: total power, all phases and energy from one sample | Included in every poll |
 
 Details for REST:
 
-- The Shelly must be a **Gen2 or newer** device (it must have the `/rpc` interface), and **authentication has to be
-  disabled** (digest authentication is not implemented).
+- A **Gen2 or newer** device needs the `/rpc` interface, and **authentication has to be disabled** (digest
+  authentication is not implemented).
+- A **Gen1** Shelly 3EM or Shelly EM is read from `/status`. If its web interface is protected, set `SHELLY_PASSWORD`
+  (and `SHELLY_USER` if the user is not `admin`); Gen1 uses basic authentication. Gen1 meters don't measure the
+  frequency, so `SHELLY_FREQUENCY` (default 50 Hz) is reported. The phases are the channels `emeters[0..2]`. A channel
+  that the Shelly marks as not valid is reported as zeros, and the energy counters are summed over the channels.
+  `SHELLY_ID` has no effect. If a Shelly EM doesn't report the current, it is calculated from the apparent power and
+  the voltage.
 - If a component is not found, or detection fails, the emulator retries on the next poll. The log shows which
   component was detected (`Detected Shelly component switch:0`).
 - A relay measures a load, so a positive power means the device consumes. If the direction is the wrong way
@@ -100,7 +113,8 @@ What "slow" means depends on the source:
   (7.5 s with the values 5 and 500). The first refresh is done right after start-up, and is retried after 10 s
   if it failed.
 - **REST, Pro 3EM:** only the energy counters. Phases, power and frequency are fresh on every poll.
-- **REST, relays (Pro 1PM, …):** nothing, everything is fresh on every poll, so the setting has no effect.
+- **REST, relays (Pro 1PM, …) and Gen1 energy meters:** nothing, everything is fresh on every poll, so the setting
+  has no effect.
 
 Every request to the Shelly has a time limit of 3 s. After a failed Modbus read the connection is dropped and
 reopened, so that a late reply can never be mistaken for the answer to the next request.

@@ -1,26 +1,39 @@
-//! Reads a Shelly Gen2+ device over its HTTP RPC interface instead of Modbus.
+//! Reads a Shelly device over HTTP instead of Modbus.
 //!
-//! The kind of device is detected from the components it reports (`Shelly.GetStatus`):
+//! Gen2+ devices are read over their RPC interface. The kind of device is detected from the components it reports
+//! (`Shelly.GetStatus`):
 //! - `em:N` (Pro 3EM): one `EM.GetStatus` call returns the total and all three phases from the same sample.
 //!   Energy counters come from `EMData.GetStatus`.
 //! - `switch:N` (Pro 1PM, Plus 1PM, Pro 2PM, …): one `Switch.GetStatus` call returns power, voltage, current,
 //!   frequency and the energy counters. It is single phase, so it is reported as phase A.
 //!
-//! Authentication on the Shelly must be disabled (digest auth is not implemented).
+//! Authentication on a Gen2+ Shelly must be disabled (digest auth is not implemented).
+//!
+//! Gen1 energy meters (Shelly 3EM `SHEM-3`, Shelly EM `SHEM`) have no RPC interface. They are recognised by the 404
+//! that `/rpc/Shelly.GetStatus` gives, followed by a `/status` reply with an `emeters` array. That one call returns
+//! the total, all phases and the energy counters. The Gen1 meters don't report the grid frequency, so a nominal one
+//! (50 Hz, or `SHELLY_FREQUENCY`) is reported. A Gen1 Shelly may use HTTP basic authentication
+//! (`SHELLY_USER` / `SHELLY_PASSWORD`).
 
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, bail};
+use reqwest::StatusCode;
 use serde_derive::Deserialize;
 
 use crate::{
-    debug::debug_log,
+    debug::{debug_log, warn_log},
     meter_data::{Measurements, PhaseMeasurements},
 };
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 /// Debug logs only show the start of long replies (`Shelly.GetStatus` is several kB)
 const DEBUG_BODY_LIMIT: usize = 700;
+/// Reported for devices that don't measure the grid frequency (Gen1 energy meters)
+const DEFAULT_FREQUENCY_HZ: f32 = 50.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -28,6 +41,37 @@ pub enum Kind {
     Em,
     /// Relay with power metering (Pro 1PM, Plus 1PM, …)
     Switch,
+    /// Gen1 energy meter with an `emeters` array (3EM, EM), read from `/status`
+    Gen1,
+}
+
+/// A reply with an HTTP error status. A type of its own, so that "the RPC interface does not exist" (404) can be told
+/// apart from other failures.
+#[derive(Debug)]
+struct HttpError {
+    url: String,
+    status: StatusCode,
+    body: String,
+}
+
+impl fmt::Display for HttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GET {} returned {}: {}",
+            self.url,
+            self.status,
+            truncate(&self.body, 300)
+        )
+    }
+}
+
+impl std::error::Error for HttpError {}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HttpError>()
+        .is_some_and(|e| e.status == StatusCode::NOT_FOUND)
 }
 
 pub struct ShellyRestClient {
@@ -36,6 +80,10 @@ pub struct ShellyRestClient {
     /// Explicit component id from `SHELLY_ID`, otherwise the lowest one found
     wanted_id: Option<u32>,
     component: Option<(Kind, u32)>,
+    /// HTTP basic authentication, only used for Gen1 devices
+    gen1_auth: Option<(String, String)>,
+    /// Reported for Gen1 devices, which can't measure it
+    gen1_frequency: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +135,32 @@ struct SwitchEnergy {
     total: Option<f32>,
 }
 
+/// The parts of a Gen1 `/status` that are used
+#[derive(Debug, Deserialize)]
+struct Gen1Status {
+    /// Only the 3EM reports a total
+    total_power: Option<f32>,
+    /// One entry per measuring channel: three for a 3EM (phases A, B, C), two for a Shelly EM
+    emeters: Option<Vec<Gen1Emeter>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Gen1Emeter {
+    /// Active power in W, positive = import
+    power: Option<f32>,
+    reactive: Option<f32>,
+    pf: Option<f32>,
+    /// Not reported by the Shelly EM
+    current: Option<f32>,
+    voltage: Option<f32>,
+    /// False if the channel has no usable measurement (no voltage, for example)
+    is_valid: Option<bool>,
+    /// Imported energy in Wh
+    total: Option<f32>,
+    /// Exported energy in Wh
+    total_returned: Option<f32>,
+}
+
 impl ShellyRestClient {
     /// `target` is the Shelly address: `192.168.1.5`, `192.168.1.5:80` or a full `http://…` URL
     pub fn new(target: &str) -> Self {
@@ -106,11 +180,25 @@ impl ShellyRestClient {
             .iter()
             .find_map(|name| std::env::var(name).ok())
             .and_then(|v| v.trim().parse().ok());
+        // Gen1 devices use basic auth with the user name from the restricted login (default `admin`)
+        let gen1_auth = std::env::var("SHELLY_PASSWORD")
+            .ok()
+            .filter(|password| !password.is_empty())
+            .map(|password| {
+                let user = std::env::var("SHELLY_USER")
+                    .ok()
+                    .filter(|user| !user.trim().is_empty())
+                    .unwrap_or_else(|| "admin".to_string());
+                (user, password)
+            });
+        let gen1_frequency = parse_frequency(std::env::var("SHELLY_FREQUENCY").ok().as_deref());
         Self {
             client,
             base_url,
             wanted_id,
             component: None,
+            gen1_auth,
+            gen1_frequency,
         }
     }
 
@@ -120,7 +208,10 @@ impl ShellyRestClient {
 
     /// True if the energy counters have to be read separately from the status
     pub fn needs_energy_read(&self) -> bool {
-        self.component.map(|(kind, _)| kind) != Some(Kind::Switch)
+        !matches!(
+            self.component.map(|(kind, _)| kind),
+            Some(Kind::Switch | Kind::Gen1)
+        )
     }
 
     /// Total power, per phase values, frequency (and for switches also the energy), all from the same Shelly sample
@@ -135,13 +226,17 @@ impl ShellyRestClient {
                 let status: SwitchStatus = self.rpc("Switch.GetStatus", Some(id)).await?;
                 status.into_measurements()
             }
+            Kind::Gen1 => {
+                let status: Gen1Status = self.gen1_status().await?;
+                status.into_measurements(self.gen1_frequency)
+            }
         }
     }
 
     /// Import and export energy counters (Wh), only for devices that don't report them in the status
     pub async fn read_energy(&mut self) -> anyhow::Result<Measurements> {
         let (kind, id) = self.component().await?;
-        if kind == Kind::Switch {
+        if matches!(kind, Kind::Switch | Kind::Gen1) {
             return Ok(Measurements::default());
         }
         let data: EmDataStatus = self.rpc("EMData.GetStatus", Some(id)).await?;
@@ -159,18 +254,49 @@ impl ShellyRestClient {
         if let Some(component) = self.component {
             return Ok(component);
         }
-        let status: serde_json::Value = self.rpc("Shelly.GetStatus", None).await.context(
-            "Cant detect the Shelly type (is this a Gen2+ device, and is authentication disabled?)",
-        )?;
-        let component = detect_component(&status, self.wanted_id)?;
-        println!(
-            "Detected Shelly component {}:{}",
-            match component.0 {
-                Kind::Em => "em",
-                Kind::Switch => "switch",
-            },
-            component.1
-        );
+        let component = match self.rpc("Shelly.GetStatus", None).await {
+            Ok(status) => {
+                let status: serde_json::Value = status;
+                detect_component(&status, self.wanted_id)?
+            }
+            // No RPC interface at all: this can be a Gen1 device
+            Err(rpc_error) if is_not_found(&rpc_error) => {
+                let gen1 = self.gen1_status().await.map_err(|gen1_error| {
+                    if gen1_error
+                        .downcast_ref::<HttpError>()
+                        .is_some_and(|e| e.status == StatusCode::UNAUTHORIZED)
+                    {
+                        gen1_error.context(
+                            "Cant detect the Shelly type. It looks like a Gen1 device with authentication, set SHELLY_USER and SHELLY_PASSWORD",
+                        )
+                    } else {
+                        anyhow::anyhow!(
+                            "Cant detect the Shelly type: not a Gen2+ device ({rpc_error}), and not a supported Gen1 energy meter ({gen1_error:#})"
+                        )
+                    }
+                })?;
+                println!(
+                    "Detected Gen1 Shelly energy meter with {} measuring channel(s)",
+                    gen1.emeters.as_ref().map_or(0, Vec::len)
+                );
+                (Kind::Gen1, 0)
+            }
+            Err(error) => {
+                return Err(error.context(
+                    "Cant detect the Shelly type (is this a Gen2+ device, and is authentication disabled?)",
+                ));
+            }
+        };
+        if component.0 != Kind::Gen1 {
+            println!(
+                "Detected Shelly component {}:{}",
+                match component.0 {
+                    Kind::Em => "em",
+                    _ => "switch",
+                },
+                component.1
+            );
+        }
         self.component = Some(component);
         Ok(component)
     }
@@ -184,25 +310,45 @@ impl ShellyRestClient {
             Some(id) => format!("{}/rpc/{method}?id={id}", self.base_url),
             None => format!("{}/rpc/{method}", self.base_url),
         };
+        self.get_json(method, url, false).await
+    }
+
+    /// The `/status` of a Gen1 device
+    async fn gen1_status(&self) -> anyhow::Result<Gen1Status> {
+        let url = format!("{}/status", self.base_url);
+        let status: Gen1Status = self.get_json("Gen1 /status", url, true).await?;
+        match status.emeters.as_deref() {
+            Some(emeters) if !emeters.is_empty() => Ok(status),
+            _ => bail!(
+                "the /status reply has no emeters (only the Gen1 energy meters Shelly 3EM and Shelly EM are supported)"
+            ),
+        }
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        label: &str,
+        url: String,
+        basic_auth: bool,
+    ) -> anyhow::Result<T> {
         let started = Instant::now();
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?;
+        let mut request = self.client.get(&url);
+        if let (true, Some((user, password))) = (basic_auth, &self.gen1_auth) {
+            request = request.basic_auth(user, Some(password));
+        }
+        let response = request.send().await.with_context(|| format!("GET {url}"))?;
         let status = response.status();
         let body = response
             .text()
             .await
             .with_context(|| format!("GET {url}"))?;
         debug_log!(
-            "Shelly {method} answered {status} in {}ms: {}",
+            "Shelly {label} answered {status} in {}ms: {}",
             started.elapsed().as_millis(),
             truncate(&body.replace('\n', "").replace("  ", ""), DEBUG_BODY_LIMIT)
         );
         if !status.is_success() {
-            bail!("GET {url} returned {status}: {}", truncate(&body, 300));
+            return Err(HttpError { url, status, body }.into());
         }
         serde_json::from_str(&body).with_context(|| {
             format!(
@@ -210,6 +356,20 @@ impl ShellyRestClient {
                 truncate(&body, DEBUG_BODY_LIMIT)
             )
         })
+    }
+}
+
+/// `SHELLY_FREQUENCY`: a plausible grid frequency, otherwise the default
+fn parse_frequency(value: Option<&str>) -> f32 {
+    match value.and_then(|v| v.trim().parse::<f32>().ok()) {
+        Some(hz) if (40.0..=70.0).contains(&hz) => hz,
+        Some(hz) => {
+            warn_log!(
+                "SHELLY_FREQUENCY={hz} is not a plausible grid frequency, using {DEFAULT_FREQUENCY_HZ} Hz"
+            );
+            DEFAULT_FREQUENCY_HZ
+        }
+        None => DEFAULT_FREQUENCY_HZ,
     }
 }
 
@@ -363,6 +523,80 @@ impl SwitchStatus {
             total_active_power: Some(power),
             phases,
             frequency: self.freq,
+            energy,
+        })
+    }
+}
+
+impl Gen1Emeter {
+    fn phase(&self) -> PhaseMeasurements {
+        if self.is_valid == Some(false) {
+            return PhaseMeasurements::default();
+        }
+        let power = self.power.unwrap_or(0.0);
+        let voltage = self.voltage.unwrap_or(0.0);
+        let apparent = match (self.reactive, self.current) {
+            (Some(reactive), _) => power.hypot(reactive),
+            (None, Some(current)) if voltage > 1.0 => voltage * current,
+            _ => power.abs(),
+        };
+        let current = self.current.unwrap_or(if voltage > 1.0 {
+            apparent / voltage
+        } else {
+            0.0
+        });
+        PhaseMeasurements {
+            voltage,
+            current,
+            active_power: power,
+            apparent_power: apparent,
+            power_factor: self.pf.unwrap_or(if apparent > 1.0 {
+                (power / apparent).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }),
+        }
+    }
+}
+
+impl Gen1Status {
+    /// The channels become the phases A, B and C. A device with fewer channels (Shelly EM) reports zeros for the
+    /// rest, and a channel that is not valid is reported as zeros too. The energy is summed over the channels.
+    fn into_measurements(self, frequency: f32) -> anyhow::Result<Measurements> {
+        let Some(emeters) = self.emeters.filter(|e| !e.is_empty()) else {
+            bail!("The Gen1 /status reply has no emeters");
+        };
+        if emeters.len() > 3 {
+            warn_log!(
+                "The Shelly reports {} emeters, only the first three are used",
+                emeters.len()
+            );
+        }
+        let emeters = &emeters[..emeters.len().min(3)];
+        let mut phases = [Some(PhaseMeasurements::default()); 3];
+        for (slot, emeter) in phases.iter_mut().zip(emeters) {
+            *slot = Some(emeter.phase());
+        }
+        let total = self.total_power.unwrap_or_else(|| {
+            emeters
+                .iter()
+                .filter(|e| e.is_valid != Some(false))
+                .filter_map(|e| e.power)
+                .sum()
+        });
+        let imported: Vec<f32> = emeters.iter().filter_map(|e| e.total).collect();
+        let energy = if imported.is_empty() {
+            None
+        } else {
+            Some((
+                imported.iter().sum(),
+                emeters.iter().filter_map(|e| e.total_returned).sum(),
+            ))
+        };
+        Ok(Measurements {
+            total_active_power: Some(total),
+            phases,
+            frequency: Some(frequency),
             energy,
         })
     }
@@ -554,9 +788,172 @@ mod tests {
         assert_eq!(m.energy, Some((123456.7, 8910.1)));
     }
 
+    // A Shelly 3EM (SHEM-3), trimmed to the fields that matter
+    const GEN1_3EM_STATUS: &str = r#"{
+        "wifi_sta": {"connected": true}, "time": "00:50",
+        "emeters": [
+            {"power": 300.5, "reactive": 120.0, "pf": 0.93, "current": 1.4, "voltage": 231.2, "is_valid": true, "total": 1000.5, "total_returned": 10.5},
+            {"power": -100.0, "reactive": 50.0, "pf": -0.89, "current": 0.5, "voltage": 230.1, "is_valid": true, "total": 2000.0, "total_returned": 20.0},
+            {"power": 400.0, "reactive": 0.0, "pf": 1.0, "current": 1.75, "voltage": 229.9, "is_valid": true, "total": 3000.0, "total_returned": 30.0}
+        ],
+        "total_power": 600.5
+    }"#;
+
+    #[tokio::test]
+    async fn reads_a_gen1_3em_when_there_is_no_rpc_interface() {
+        let mut server = mockito::Server::new_async().await;
+        let rpc = server
+            .mock("GET", "/rpc/Shelly.GetStatus")
+            .with_status(404)
+            .with_body("Not Found")
+            .expect(1) // detected once, not on every poll
+            .create();
+        // One call to recognise the device, then one per read
+        let status = server
+            .mock("GET", "/status")
+            .with_status(200)
+            .with_body(GEN1_3EM_STATUS)
+            .expect(3)
+            .create();
+
+        let mut client = ShellyRestClient::new(&server.url());
+        let m = client.read_status().await.unwrap();
+        let _ = client.read_status().await.unwrap();
+        rpc.assert();
+        status.assert();
+
+        assert_eq!(m.total_active_power, Some(600.5));
+        let phases = m.all_phases().unwrap();
+        assert_eq!(phases[0].voltage, 231.2);
+        assert_eq!(phases[0].current, 1.4);
+        assert_eq!(phases[0].active_power, 300.5);
+        assert!((phases[0].apparent_power - 300.5f32.hypot(120.0)).abs() < 0.01);
+        assert_eq!(phases[0].power_factor, 0.93);
+        assert_eq!(phases[1].active_power, -100.0);
+        assert_eq!(phases[1].power_factor, -0.89);
+        assert_eq!(phases[2].current, 1.75);
+        // The Gen1 3EM has no frequency, a nominal one is reported
+        assert_eq!(m.frequency, Some(DEFAULT_FREQUENCY_HZ));
+        // Energy is in the status: summed over the phases, nothing separate to read
+        assert_eq!(m.energy, Some((6000.5, 60.5)));
+        assert!(!client.needs_energy_read());
+        assert_eq!(client.read_energy().await.unwrap(), Measurements::default());
+    }
+
+    #[tokio::test]
+    async fn gen1_sends_basic_auth_when_configured() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/rpc/Shelly.GetStatus")
+            .with_status(404)
+            .create();
+        // admin:secret
+        let authorised = server
+            .mock("GET", "/status")
+            .match_header("authorization", "Basic YWRtaW46c2VjcmV0")
+            .with_status(200)
+            .with_body(GEN1_3EM_STATUS)
+            .expect(2)
+            .create();
+        let mut client = ShellyRestClient::new(&server.url());
+        client.gen1_auth = Some(("admin".into(), "secret".into()));
+        client.read_status().await.unwrap();
+        authorised.assert();
+    }
+
+    #[tokio::test]
+    async fn gen1_with_authentication_says_what_to_set() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/rpc/Shelly.GetStatus")
+            .with_status(404)
+            .create();
+        server
+            .mock("GET", "/status")
+            .with_status(401)
+            .with_body("Unauthorized")
+            .create();
+        let mut client = ShellyRestClient::new(&server.url());
+        client.gen1_auth = None;
+        let err = format!("{:#}", client.read_status().await.unwrap_err());
+        assert!(
+            err.contains("SHELLY_PASSWORD") && err.contains("401"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_404_device_without_emeters_is_not_taken_for_a_gen1_meter() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/rpc/Shelly.GetStatus")
+            .with_status(404)
+            .create();
+        server
+            .mock("GET", "/status")
+            .with_status(200)
+            .with_body(r#"{"relays":[{"ison":false}],"meters":[{"power":0.0}]}"#)
+            .create();
+        let mut client = ShellyRestClient::new(&server.url());
+        let err = format!("{:#}", client.read_status().await.unwrap_err());
+        assert!(err.contains("no emeters") && err.contains("Gen2"), "{err}");
+        assert!(client.needs_energy_read(), "nothing was detected");
+    }
+
+    #[test]
+    fn gen1_shelly_em_with_two_channels_and_no_current() {
+        let status: Gen1Status = serde_json::from_str(
+            r#"{"emeters": [
+                {"power": 230.0, "reactive": 0.0, "pf": 1.0, "voltage": 230.0, "is_valid": true, "total": 10.0, "total_returned": 1.0},
+                {"power": 0.0, "reactive": 0.0, "pf": 0.0, "voltage": 230.0, "is_valid": true, "total": 5.0, "total_returned": 0.0}
+            ]}"#,
+        )
+        .unwrap();
+        let m = status.into_measurements(50.0).unwrap();
+        // No total_power in the reply: the sum of the channels
+        assert_eq!(m.total_active_power, Some(230.0));
+        let phases = m.all_phases().unwrap();
+        // Current is derived from the apparent power
+        assert!((phases[0].current - 1.0).abs() < 0.001);
+        assert_eq!(phases[1].current, 0.0);
+        // The missing third phase is zeros
+        assert_eq!(phases[2], PhaseMeasurements::default());
+        assert_eq!(m.energy, Some((15.0, 1.0)));
+    }
+
+    #[test]
+    fn gen1_invalid_channel_reports_zeros_and_is_left_out_of_the_derived_total() {
+        let status: Gen1Status = serde_json::from_str(
+            r#"{"emeters": [
+                {"power": 100.0, "voltage": 230.0, "current": 0.5, "is_valid": true},
+                {"power": 999.0, "voltage": 230.0, "current": 4.0, "is_valid": false},
+                {"power": 50.0, "voltage": 230.0, "current": 0.25, "is_valid": true}
+            ]}"#,
+        )
+        .unwrap();
+        let m = status.into_measurements(50.0).unwrap();
+        assert_eq!(m.total_active_power, Some(150.0));
+        let phases = m.all_phases().unwrap();
+        assert_eq!(phases[1], PhaseMeasurements::default());
+        // Without reactive power the apparent power comes from voltage and current
+        assert!((phases[0].apparent_power - 115.0).abs() < 0.01);
+        // No counters in the reply: no energy
+        assert_eq!(m.energy, None);
+    }
+
+    #[test]
+    fn frequency_setting() {
+        assert_eq!(parse_frequency(None), 50.0);
+        assert_eq!(parse_frequency(Some("60")), 60.0);
+        assert_eq!(parse_frequency(Some(" 49.95 ")), 49.95);
+        // Garbage and implausible values fall back to the default
+        assert_eq!(parse_frequency(Some("fifty")), DEFAULT_FREQUENCY_HZ);
+        assert_eq!(parse_frequency(Some("0")), DEFAULT_FREQUENCY_HZ);
+    }
+
     #[tokio::test]
     async fn errors_are_reported_not_swallowed() {
-        // Detection fails (old Gen1 style device without the RPC interface), and is retried next time
+        // Detection fails (no RPC interface, and not a Gen1 energy meter either), and is retried next time
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/rpc/Shelly.GetStatus")
