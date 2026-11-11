@@ -8,7 +8,7 @@ use crate::{
     home_assistant::HomeAssistantAPI,
     meter_data::Measurements,
     rolling_average::RollingAverage,
-    shelly_3em_client::{SLOW_STEPS, Shelly3EMClient},
+    shelly_3em_client::Shelly3EMClient,
     shelly_rest_client::ShellyRestClient,
     smart_meter_emulator::Readings,
 };
@@ -157,7 +157,7 @@ impl DataFetcher {
             }
             state.merge(fast);
 
-            // Slow values (phases, frequency, energy) one small step at a time, so they never hold up the power
+            // Slow values (the energy counters), read in steps so that they never hold up the power
             let mut slow_note = String::new();
             if let Some(step) = slow.due_step(cycle_started, source.slow_steps()) {
                 let step_started = Instant::now();
@@ -479,17 +479,17 @@ impl Source {
     /// How many calls make up one complete slow read
     fn slow_steps(&self) -> usize {
         match self {
-            Source::Modbus(_) => SLOW_STEPS,
             // Everything but the energy counters already came with the fast read
+            Source::Modbus(_) => 1,
             Source::Rest(client) if client.needs_energy_read() => 1,
             // A switch reports its energy together with the power
             Source::Rest(_) => 0,
         }
     }
 
-    async fn read_slow_step(&mut self, step: usize) -> Result<Measurements, String> {
+    async fn read_slow_step(&mut self, _step: usize) -> Result<Measurements, String> {
         match self {
-            Source::Modbus(client) => client.read_slow_step(step).await.map_err(|e| e.to_string()),
+            Source::Modbus(client) => client.read_energy().await.map_err(|e| e.to_string()),
             Source::Rest(client) => client.read_energy().await.map_err(|e| format!("{e:#}")),
         }
     }

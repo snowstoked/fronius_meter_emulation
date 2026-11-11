@@ -36,9 +36,6 @@ const PHASE_FLOAT_COUNT: u16 = 5;
 const REL_PHASE_FREQUENCY: u16 = 13; // relative to the phase, we only read phase A
 const REL_ENERGY: u16 = 162; // total import, then total export (Wh)
 
-/// The slow read is split into steps that are run one per fast cycle, so a slow read never delays the power reading
-pub const SLOW_STEPS: usize = 5;
-
 pub struct Shelly3EMClient {
     target: SocketAddr,
     connection: Option<Context>,
@@ -73,44 +70,51 @@ impl Shelly3EMClient {
         }
     }
 
-    /// Net power, the only thing that needs reading quickly
+    /// Everything that changes with the load: net power, the three phases and the frequency.
+    ///
+    /// They are read one after the other in the same cycle (five requests of about 1 ms each), so that the inverter
+    /// gets phase values that belong to the total. The inverter reads the phases as well as the total, and phase
+    /// values that are older than the total (they used to be refreshed once per minute) made it regulate against
+    /// a power that was no longer there.
+    ///
+    /// The total is read first, and all of it counts as one reading: if any request fails, so does the read, and
+    /// nothing is published from it.
     pub async fn read_fast(&mut self) -> Result<Measurements, ReadError> {
         let regs = self.read_component(REL_TOTAL_ACTIVE_POWER, 2).await?;
-        Ok(Measurements {
+        let mut result = Measurements {
             total_active_power: Some(merge_u16_f32(regs[0], regs[1])),
             ..Default::default()
-        })
+        };
+        for (phase, rel) in [REL_PHASE_A, REL_PHASE_B, REL_PHASE_C]
+            .into_iter()
+            .enumerate()
+        {
+            let regs = self.read_component(rel, 2 * PHASE_FLOAT_COUNT).await?;
+            let f = decode_floats(&regs);
+            result.phases[phase] = Some(PhaseMeasurements {
+                voltage: f[0],
+                current: f[1],
+                active_power: f[2],
+                apparent_power: f[3],
+                power_factor: f[4],
+            });
+        }
+        let regs = self
+            .read_component(REL_PHASE_A + REL_PHASE_FREQUENCY, 2)
+            .await?;
+        result.frequency = Some(merge_u16_f32(regs[0], regs[1]));
+        Ok(result)
     }
 
-    /// One piece of the slow data, see `SLOW_STEPS`
-    pub async fn read_slow_step(&mut self, step: usize) -> Result<Measurements, ReadError> {
-        let mut result = Measurements::default();
-        match step {
-            0..=2 => {
-                let rel = [REL_PHASE_A, REL_PHASE_B, REL_PHASE_C][step];
-                let regs = self.read_component(rel, 2 * PHASE_FLOAT_COUNT).await?;
-                let f = decode_floats(&regs);
-                result.phases[step] = Some(PhaseMeasurements {
-                    voltage: f[0],
-                    current: f[1],
-                    active_power: f[2],
-                    apparent_power: f[3],
-                    power_factor: f[4],
-                });
-            }
-            3 => {
-                let regs = self
-                    .read_component(REL_PHASE_A + REL_PHASE_FREQUENCY, 2)
-                    .await?;
-                result.frequency = Some(merge_u16_f32(regs[0], regs[1]));
-            }
-            _ => {
-                let regs = self.read_component(REL_ENERGY, 4).await?;
-                let f = decode_floats(&regs);
-                result.energy = Some((f[0], f[1]));
-            }
-        }
-        Ok(result)
+    /// Import and export energy counters (Wh). They only matter for the inverter's statistics, so they are read at
+    /// the slow interval.
+    pub async fn read_energy(&mut self) -> Result<Measurements, ReadError> {
+        let regs = self.read_component(REL_ENERGY, 4).await?;
+        let f = decode_floats(&regs);
+        Ok(Measurements {
+            energy: Some((f[0], f[1])),
+            ..Default::default()
+        })
     }
 
     /// Reads from the EM component block, working out where the Shelly serves it on the first success
@@ -247,6 +251,9 @@ mod tests {
         shelly
     }
 
+    /// Requests of one fast read: total, phases A to C, frequency
+    const FAST_REQUESTS: usize = 5;
+
     #[tokio::test]
     async fn reads_power_from_the_documented_range() {
         let addr = populated(31000).spawn().await;
@@ -268,11 +275,11 @@ mod tests {
             Some(-1234.5)
         );
         assert_eq!(client.base, 1000);
-        // One refused attempt at 31000, one success at 1000
-        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        // One refused attempt at 31000, then everything at 1000
+        assert_eq!(reads.load(Ordering::SeqCst), 1 + FAST_REQUESTS);
         // Once known, only the right range is asked
         client.read_fast().await.unwrap();
-        assert_eq!(reads.load(Ordering::SeqCst), 3);
+        assert_eq!(reads.load(Ordering::SeqCst), 1 + 2 * FAST_REQUESTS);
     }
 
     #[tokio::test]
@@ -289,13 +296,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_slow_steps_decode_their_part() {
+    async fn one_fast_read_has_total_phases_and_frequency() {
         let addr = populated(31000).spawn().await;
         let mut client = Shelly3EMClient::new(addr);
-        let mut all = Measurements::default();
-        for step in 0..SLOW_STEPS {
-            all.merge(client.read_slow_step(step).await.unwrap());
-        }
+        let all = client.read_fast().await.unwrap();
+        assert_eq!(all.total_active_power, Some(-1234.5));
+        // The energy counters are not part of it
+        assert_eq!(all.energy, None);
         let [a, b, c] = all.all_phases().unwrap();
         assert_eq!(
             (a.voltage, a.current, a.active_power, a.apparent_power),
@@ -311,17 +318,30 @@ mod tests {
             (233.0, 4.0, 900.0)
         );
         assert_eq!(all.frequency, Some(49.97));
-        assert_eq!(all.energy, Some((12345.0, 678.0)));
     }
 
     #[tokio::test]
-    async fn a_step_only_fills_its_own_phase() {
+    async fn energy_is_a_read_of_its_own() {
         let addr = populated(31000).spawn().await;
         let mut client = Shelly3EMClient::new(addr);
-        let m = client.read_slow_step(1).await.unwrap();
-        assert!(m.phases[0].is_none() && m.phases[2].is_none());
-        assert_eq!(m.phases[1].unwrap().voltage, 232.0);
-        assert!(m.frequency.is_none() && m.energy.is_none());
+        let m = client.read_energy().await.unwrap();
+        assert_eq!(m.energy, Some((12345.0, 678.0)));
+        assert!(m.total_active_power.is_none() && m.frequency.is_none());
+        assert!(m.phases.iter().all(Option::is_none));
+    }
+
+    #[tokio::test]
+    async fn a_phase_the_shelly_does_not_answer_fails_the_whole_read() {
+        // Total power is served, phase C is not: a read with a total from now and phases from nowhere is not published
+        let shelly = FakeShelly::new(31000);
+        shelly.set_total_power(100.0);
+        shelly.set_phase(0, 231.0, 2.0, 400.0, 460.0, 0.87);
+        shelly.set_phase(1, 232.0, 3.0, 100.0, 700.0, 0.14);
+        shelly.set_frequency(50.0);
+        let addr = shelly.spawn().await;
+        let mut client = Shelly3EMClient::new(addr);
+        let err = client.read_fast().await.unwrap_err();
+        assert!(matches!(err, ReadError::Exception(_)), "{err:?}");
     }
 
     #[tokio::test]

@@ -45,8 +45,9 @@ Use a restart policy. If the Shelly stops answering for 30 s the emulator exits 
   `em:N` components (Pro 3EM, three phases) and `switch:N` components (Pro 1PM and other relays with power metering, reported as one phase).
   Gen1 energy meters (Shelly 3EM, Shelly EM) are recognised too, because they have no RPC interface; see [Configuration](docs/configuration.md) for their authentication and frequency settings.
 
-The power is read twice per second (Shelly devices only update at 1Hz, but this reduces latency). Phases, frequency and energy counters are
-refreshed every `SLOW_METER_READ_INTERVAL_S` seconds for Modbus, and with every read for REST.
+The power, the three phases and the frequency are read together twice per second (Shelly devices only update at 1Hz, but this reduces latency),
+so the inverter never gets a new total next to old phase values. Only the energy counters are refreshed every `SLOW_METER_READ_INTERVAL_S` seconds
+for Modbus, and with every read for REST.
 Every Shelly read has a time limit, and a failed read never re-sends an old value.
 See [Configuration](docs/configuration.md) for the details and the list of supported devices.
 

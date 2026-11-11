@@ -170,6 +170,23 @@ mod system_tests {
     }
 
     #[tokio::test]
+    async fn phases_follow_the_total_and_do_not_wait_for_the_slow_interval() {
+        // The inverter must never get a new total next to phase values that are a minute old
+        let mut sys = start(&[("SLOW_METER_READ_INTERVAL_S", "60")], 1).await;
+        sys.wait_for(|b| total(b) == 500.0 && f32_at(b, 40071, POWER_A) == 200.0)
+            .await;
+        sys.shelly.set_total_power(-4200.0);
+        sys.shelly.set_phase(0, 231.0, 6.0, -1400.0, 1400.0, 1.0);
+        sys.shelly.set_phase(1, 232.0, 6.0, -1400.0, 1400.0, 1.0);
+        sys.shelly.set_phase(2, 233.0, 6.0, -1400.0, 1400.0, 1.0);
+        // The first block that shows the new total also shows the new phases
+        let b = sys.wait_for(|b| total(b) == -4200.0).await;
+        assert_eq!(f32_at(&b, 40071, POWER_A), -1400.0);
+        assert_eq!(f32_at(&b, 40071, POWER_B), -1400.0);
+        assert_eq!(f32_at(&b, 40071, POWER_C), -1400.0);
+    }
+
+    #[tokio::test]
     async fn changes_on_the_shelly_follow_within_a_few_cycles() {
         let mut sys = start(&[], 1).await;
         sys.wait_for(|b| total(b) == 500.0).await;

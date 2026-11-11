@@ -104,14 +104,16 @@ The emulator only supports reading (function codes 3 and 4). Writes are refused.
 | Variable | Default | Description |
 |---|---|---|
 | `SHELLY_POLL_INTERVAL_MS` | `500` | How often the Shelly is polled for the total power. Minimum 100. A Shelly only measures about once per second, so values below 500 gain little. |
-| `SLOW_METER_READ_INTERVAL_S` | `60` | How often the slower values are refreshed (see below). |
+| `SLOW_METER_READ_INTERVAL_S` | `60` | How often the energy counters are refreshed (see below). |
 
-What "slow" means depends on the source:
+Only the energy counters are "slow". Total power, phases and frequency are read on every poll, because the inverter
+looks at the phases as well as the total, and phase values that are older than the total can make it regulate against a
+power that is no longer there. This is the same for every source:
 
-- **Modbus:** phases, frequency and energy counters. They are read in five small requests, one per poll
-  cycle, so they never delay the power reading. A complete refresh therefore takes `interval + 5 × poll interval`
-  (7.5 s with the values 5 and 500). The first refresh is done right after start-up, and is retried after 10 s
-  if it failed.
+- **Modbus:** one poll is five small requests (total power, phases A, B and C, frequency), about 1 ms each, one
+  after the other. All of them have to succeed, otherwise nothing is published for that poll. The energy counters are
+  one more request at the slow interval, one poll cycle only. The first read is done right after start-up, and is
+  retried after 10 s if it failed.
 - **REST, Pro 3EM:** only the energy counters. Phases, power and frequency are fresh on every poll.
 - **REST, relays (Pro 1PM, …) and Gen1 energy meters:** nothing, everything is fresh on every poll, so the setting
   has no effect.

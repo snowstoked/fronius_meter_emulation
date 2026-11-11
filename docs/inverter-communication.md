@@ -137,10 +137,17 @@ What this means:
 - With **`SHELLY_POLL_INTERVAL_MS`** below 500 the emulator asks more often, but the Shelly still measures at about
   1 Hz, so the gain is small.
 
-Compared with the original PR code: the slow reads (phases, energy) ran in the same loop as the power read, so
-the power value froze while they ran. In a simulation with a Shelly that needs 0.25 s per Modbus request this was
-a freeze of 1.5 s every slow cycle; now the slow reads are spread over the fast cycles and the worst case was 0.76 s.
+Compared with the original PR code: the slow reads ran in the same loop as the power read, so the power value
+froze while they ran. In a simulation with a Shelly that needs 0.25 s per Modbus request this was a freeze of 1.5 s
+every slow cycle; now only the energy counters are a slow read, and it is a single request in a cycle of its own.
 Updates are also written to the register file as one batch, so the inverter can never read half old, half new values.
+
+The phases and the frequency are read in every cycle, next to the total power (five requests of about 1 ms). They
+used to be refreshed once per `SLOW_METER_READ_INTERVAL_S` (60 s by default), which meant that for up to a minute the
+inverter got a current total together with phase values from the last refresh, sometimes with the opposite sign.
+In a debug log of such a setup the net power moved in straight ramps and turned around within a few seconds after
+each phase refresh, so the inverter appears to regulate on the phase values too. With a Shelly that is slow to answer, a
+cycle now takes five times as long as before; the log warns when a power read takes more than 1 s.
 
 ## Capturing the traffic yourself
 
