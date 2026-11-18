@@ -92,6 +92,7 @@ SHELLY_ID # Component id for SHELLY_REST if the device has several (default: low
 SHELLY_USER # User for HTTP basic authentication of a Gen1 Shelly (default admin, only used with SHELLY_PASSWORD)
 SHELLY_PASSWORD # Password for HTTP basic authentication of a Gen1 Shelly (default: none)
 SHELLY_FREQUENCY # Grid frequency in Hz reported for devices that can't measure it, i.e. Gen1 (default 50)
+SHELLY_VOLTAGE # Voltage in V reported for Gen1 single channel devices such as the 1PM, which can't measure it (default 230)
 SHELLY_INVERT # Flip the direction of power flow (true/false)
 SHELLY_POLL_INTERVAL_MS # Interval between power readings in ms (default 500, minimum 100)
 SLOW_METER_READ_INTERVAL_S # Interval in seconds between slow meter reads (default 60)

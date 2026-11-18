@@ -14,6 +14,10 @@
 //! the total, all phases and the energy counters. The Gen1 meters don't report the grid frequency, so a nominal one
 //! (50 Hz, or `SHELLY_FREQUENCY`) is reported. A Gen1 Shelly may use HTTP basic authentication
 //! (`SHELLY_USER` / `SHELLY_PASSWORD`).
+//!
+//! Gen1 single channel devices (Shelly 1PM, Plug S, …) have a `meters` array and no `emeters`. They are reported as
+//! phase A, phases B and C are zero. They report neither voltage nor frequency, so `SHELLY_VOLTAGE` (230 V) and
+//! `SHELLY_FREQUENCY` (50 Hz) are assumed, and the current is derived from the power.
 
 use std::{
     fmt,
@@ -34,6 +38,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(3);
 const DEBUG_BODY_LIMIT: usize = 700;
 /// Reported for devices that don't measure the grid frequency (Gen1 energy meters)
 const DEFAULT_FREQUENCY_HZ: f32 = 50.0;
+/// Reported for Gen1 single channel devices, which don't measure the voltage
+const DEFAULT_VOLTAGE_V: f32 = 230.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -41,7 +47,8 @@ pub enum Kind {
     Em,
     /// Relay with power metering (Pro 1PM, Plus 1PM, …)
     Switch,
-    /// Gen1 energy meter with an `emeters` array (3EM, EM), read from `/status`
+    /// Gen1 device read from `/status`: energy meter with an `emeters` array (3EM, EM) or single channel device with
+    /// a `meters` array (1PM)
     Gen1,
 }
 
@@ -84,6 +91,8 @@ pub struct ShellyRestClient {
     gen1_auth: Option<(String, String)>,
     /// Reported for Gen1 devices, which can't measure it
     gen1_frequency: f32,
+    /// Reported for Gen1 single channel devices, which can't measure it
+    gen1_voltage: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +151,18 @@ struct Gen1Status {
     total_power: Option<f32>,
     /// One entry per measuring channel: three for a 3EM (phases A, B, C), two for a Shelly EM
     emeters: Option<Vec<Gen1Emeter>>,
+    /// Single channel devices (1PM). Some energy meters list this as well, `emeters` wins then.
+    meters: Option<Vec<Gen1Meter>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Gen1Meter {
+    /// Active power in W, positive = the load consumes
+    power: Option<f32>,
+    /// False if the channel has no usable measurement
+    is_valid: Option<bool>,
+    /// Consumed energy in watt-minutes
+    total: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +213,7 @@ impl ShellyRestClient {
                 (user, password)
             });
         let gen1_frequency = parse_frequency(std::env::var("SHELLY_FREQUENCY").ok().as_deref());
+        let gen1_voltage = parse_voltage(std::env::var("SHELLY_VOLTAGE").ok().as_deref());
         Self {
             client,
             base_url,
@@ -199,6 +221,7 @@ impl ShellyRestClient {
             component: None,
             gen1_auth,
             gen1_frequency,
+            gen1_voltage,
         }
     }
 
@@ -228,7 +251,7 @@ impl ShellyRestClient {
             }
             Kind::Gen1 => {
                 let status: Gen1Status = self.gen1_status().await?;
-                status.into_measurements(self.gen1_frequency)
+                status.into_measurements(self.gen1_frequency, self.gen1_voltage)
             }
         }
     }
@@ -275,10 +298,14 @@ impl ShellyRestClient {
                         )
                     }
                 })?;
-                println!(
-                    "Detected Gen1 Shelly energy meter with {} measuring channel(s)",
-                    gen1.emeters.as_ref().map_or(0, Vec::len)
-                );
+                if gen1.has_emeters() {
+                    println!(
+                        "Detected Gen1 Shelly energy meter with {} measuring channel(s)",
+                        gen1.emeters.as_ref().map_or(0, Vec::len)
+                    );
+                } else {
+                    println!("Detected Gen1 Shelly single channel meter (reported as phase A)");
+                }
                 (Kind::Gen1, 0)
             }
             Err(error) => {
@@ -317,11 +344,12 @@ impl ShellyRestClient {
     async fn gen1_status(&self) -> anyhow::Result<Gen1Status> {
         let url = format!("{}/status", self.base_url);
         let status: Gen1Status = self.get_json("Gen1 /status", url, true).await?;
-        match status.emeters.as_deref() {
-            Some(emeters) if !emeters.is_empty() => Ok(status),
-            _ => bail!(
-                "the /status reply has no emeters (only the Gen1 energy meters Shelly 3EM and Shelly EM are supported)"
-            ),
+        if status.has_emeters() || status.meters.as_deref().is_some_and(|m| !m.is_empty()) {
+            Ok(status)
+        } else {
+            bail!(
+                "the /status reply has no emeters or meters (supported Gen1 devices are the Shelly 3EM, EM and 1PM)"
+            )
         }
     }
 
@@ -370,6 +398,20 @@ fn parse_frequency(value: Option<&str>) -> f32 {
             DEFAULT_FREQUENCY_HZ
         }
         None => DEFAULT_FREQUENCY_HZ,
+    }
+}
+
+/// `SHELLY_VOLTAGE`: a plausible mains voltage, otherwise the default
+fn parse_voltage(value: Option<&str>) -> f32 {
+    match value.and_then(|v| v.trim().parse::<f32>().ok()) {
+        Some(volts) if (100.0..=300.0).contains(&volts) => volts,
+        Some(volts) => {
+            warn_log!(
+                "SHELLY_VOLTAGE={volts} is not a plausible mains voltage, using {DEFAULT_VOLTAGE_V} V"
+            );
+            DEFAULT_VOLTAGE_V
+        }
+        None => DEFAULT_VOLTAGE_V,
     }
 }
 
@@ -560,9 +602,50 @@ impl Gen1Emeter {
 }
 
 impl Gen1Status {
+    fn has_emeters(&self) -> bool {
+        self.emeters.as_deref().is_some_and(|e| !e.is_empty())
+    }
+
+    /// A single channel device (Shelly 1PM): phase A carries the power, phases B and C are zero. There is no voltage
+    /// or current in the reply, so the configured voltage is assumed and the current follows from the power.
+    fn meter_measurements(self, frequency: f32, voltage: f32) -> anyhow::Result<Measurements> {
+        let Some(meter) = self.meters.and_then(|m| m.into_iter().next()) else {
+            bail!("The Gen1 /status reply has no meters");
+        };
+        let Some(power) = meter.power else {
+            bail!("The Gen1 /status meters[0] has no power");
+        };
+        if meter.is_valid == Some(false) {
+            bail!("The Shelly reports meters[0] as not valid");
+        }
+        // No reactive power is reported, the load is treated as purely active
+        let apparent = power.abs();
+        let phase_a = PhaseMeasurements {
+            voltage,
+            current: apparent / voltage,
+            active_power: power,
+            apparent_power: apparent,
+            power_factor: if apparent > 1.0 { power.signum() } else { 0.0 },
+        };
+        Ok(Measurements {
+            total_active_power: Some(power),
+            phases: [
+                Some(phase_a),
+                Some(PhaseMeasurements::default()),
+                Some(PhaseMeasurements::default()),
+            ],
+            frequency: Some(frequency),
+            // The counter is in watt-minutes and only counts consumption
+            energy: meter.total.map(|wm| (wm / 60.0, 0.0)),
+        })
+    }
+
     /// The channels become the phases A, B and C. A device with fewer channels (Shelly EM) reports zeros for the
     /// rest, and a channel that is not valid is reported as zeros too. The energy is summed over the channels.
-    fn into_measurements(self, frequency: f32) -> anyhow::Result<Measurements> {
+    fn into_measurements(self, frequency: f32, voltage: f32) -> anyhow::Result<Measurements> {
+        if !self.has_emeters() {
+            return self.meter_measurements(frequency, voltage);
+        }
         let Some(emeters) = self.emeters.filter(|e| !e.is_empty()) else {
             bail!("The Gen1 /status reply has no emeters");
         };
@@ -840,6 +923,78 @@ mod tests {
         assert_eq!(client.read_energy().await.unwrap(), Measurements::default());
     }
 
+    const GEN1_1PM_STATUS: &str = r#"{
+        "wifi_sta": {"connected": true}, "relays": [{"ison": true}],
+        "meters": [{"power": 123.45, "overpower": 0.0, "is_valid": true, "timestamp": 1700000000,
+                    "counters": [1.0, 2.0, 3.0], "total": 6000}],
+        "temperature": 40.0
+    }"#;
+
+    #[tokio::test]
+    async fn reads_a_gen1_1pm_as_phase_a() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/rpc/Shelly.GetStatus")
+            .with_status(404)
+            .with_body("Not Found")
+            .expect(1)
+            .create();
+        server
+            .mock("GET", "/status")
+            .with_status(200)
+            .with_body(GEN1_1PM_STATUS)
+            .create();
+
+        let mut client = ShellyRestClient::new(&server.url());
+        let m = client.read_status().await.unwrap();
+        assert!(!client.needs_energy_read());
+
+        assert_eq!(m.total_active_power, Some(123.45));
+        let phases = m.all_phases().unwrap();
+        assert_eq!(phases[0].active_power, 123.45);
+        assert_eq!(phases[0].voltage, DEFAULT_VOLTAGE_V);
+        assert!((phases[0].current - 123.45 / 230.0).abs() < 1e-4);
+        assert_eq!(phases[0].power_factor, 1.0);
+        assert_eq!(phases[1], PhaseMeasurements::default());
+        assert_eq!(phases[2], PhaseMeasurements::default());
+        assert_eq!(m.frequency, Some(DEFAULT_FREQUENCY_HZ));
+        // Watt-minutes to Wh, consumption only
+        assert_eq!(m.energy, Some((100.0, 0.0)));
+        assert_eq!(client.read_energy().await.unwrap(), Measurements::default());
+    }
+
+    #[test]
+    fn gen1_1pm_invalid_or_empty_meter_is_an_error() {
+        let status = |json: &str| serde_json::from_str::<Gen1Status>(json).unwrap();
+        let err = status(r#"{"meters":[{"power":5.0,"is_valid":false}]}"#)
+            .into_measurements(50.0, 230.0)
+            .unwrap_err();
+        assert!(err.to_string().contains("not valid"), "{err}");
+        assert!(
+            status(r#"{"meters":[{"is_valid":true}]}"#)
+                .into_measurements(50.0, 230.0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn gen1_emeters_win_over_a_meters_array() {
+        let status: Gen1Status = serde_json::from_str(
+            r#"{"meters":[{"power":1.0}],"emeters":[{"power":300.0,"voltage":230.0,"is_valid":true}]}"#,
+        )
+        .unwrap();
+        let m = status.into_measurements(50.0, 230.0).unwrap();
+        assert_eq!(m.total_active_power, Some(300.0));
+    }
+
+    #[test]
+    fn voltage_setting_is_checked() {
+        assert_eq!(parse_voltage(Some("235.5")), 235.5);
+        assert_eq!(parse_voltage(None), DEFAULT_VOLTAGE_V);
+        assert_eq!(parse_voltage(Some("abc")), DEFAULT_VOLTAGE_V);
+        assert_eq!(parse_voltage(Some("5")), DEFAULT_VOLTAGE_V);
+    }
+
     #[tokio::test]
     async fn gen1_sends_basic_auth_when_configured() {
         let mut server = mockito::Server::new_async().await;
@@ -883,7 +1038,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_404_device_without_emeters_is_not_taken_for_a_gen1_meter() {
+    async fn a_404_device_without_emeters_or_meters_is_not_taken_for_a_gen1_meter() {
         let mut server = mockito::Server::new_async().await;
         server
             .mock("GET", "/rpc/Shelly.GetStatus")
@@ -892,11 +1047,14 @@ mod tests {
         server
             .mock("GET", "/status")
             .with_status(200)
-            .with_body(r#"{"relays":[{"ison":false}],"meters":[{"power":0.0}]}"#)
+            .with_body(r#"{"relays":[{"ison":false}],"wifi_sta":{}}"#)
             .create();
         let mut client = ShellyRestClient::new(&server.url());
         let err = format!("{:#}", client.read_status().await.unwrap_err());
-        assert!(err.contains("no emeters") && err.contains("Gen2"), "{err}");
+        assert!(
+            err.contains("no emeters or meters") && err.contains("Gen2"),
+            "{err}"
+        );
         assert!(client.needs_energy_read(), "nothing was detected");
     }
 
@@ -909,7 +1067,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        let m = status.into_measurements(50.0).unwrap();
+        let m = status.into_measurements(50.0, DEFAULT_VOLTAGE_V).unwrap();
         // No total_power in the reply: the sum of the channels
         assert_eq!(m.total_active_power, Some(230.0));
         let phases = m.all_phases().unwrap();
@@ -931,7 +1089,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        let m = status.into_measurements(50.0).unwrap();
+        let m = status.into_measurements(50.0, DEFAULT_VOLTAGE_V).unwrap();
         assert_eq!(m.total_active_power, Some(150.0));
         let phases = m.all_phases().unwrap();
         assert_eq!(phases[1], PhaseMeasurements::default());

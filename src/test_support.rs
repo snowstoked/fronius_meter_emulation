@@ -53,6 +53,7 @@ pub const ALL_ENV: &[&str] = &[
     "SHELLY_MODBUS",
     "SHELLY_ID",
     "SHELLY_EM_ID",
+    "SHELLY_VOLTAGE",
     "SHELLY_IP",
     "SHELLY_PORT",
     "FRONIUS_SERIAL",
