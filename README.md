@@ -43,6 +43,7 @@ Use a restart policy. If the Shelly stops answering for 30 s the emulator exits 
 - `SHELLY_MODBUS=ip:port`: reads the Shelly over Modbus TCP. Fastest, and what the Pro 3EM is best used with.
 - `SHELLY_REST=ip`: reads the Shelly over its HTTP RPC interface, for devices without Modbus. The device type is detected automatically:
   `em:N` components (Pro 3EM, three phases) and `switch:N` components (Pro 1PM and other relays with power metering, reported as one phase).
+  Gen1 devices (no `/rpc`) are read from `/status`: Shelly 1PM as one phase (A, the other two stay 0), Shelly EM / 3EM with their phases.
 
 The power is read twice per second (Shelly devices only update at 1Hz, but this reduces latency). Phases, frequency and energy counters are
 refreshed every `SLOW_METER_READ_INTERVAL_S` seconds for Modbus, and with every read for REST.
@@ -87,6 +88,9 @@ All options are described in [docs/configuration.md](docs/configuration.md).
 SHELLY_MODBUS # ip:port of the Shelly's Modbus TCP server
 SHELLY_REST # Address of the Shelly for HTTP RPC reads (ip or http://ip), used instead of SHELLY_MODBUS if set
 SHELLY_ID # Component id for SHELLY_REST if the device has several (default: lowest; SHELLY_EM_ID is the old name)
+SHELLY_USER # Basic auth user for Gen1 devices (with SHELLY_PASSWORD)
+SHELLY_VOLTAGE # Voltage assumed for a Gen1 1PM, which does not report one (default 230)
+SHELLY_FREQUENCY # Frequency announced for Gen1 devices (default 50)
 SHELLY_INVERT # Flip the direction of power flow (true/false)
 SHELLY_POLL_INTERVAL_MS # Interval between power readings in ms (default 500, minimum 100)
 SLOW_METER_READ_INTERVAL_S # Interval in seconds between slow meter reads (default 60)
