@@ -43,9 +43,11 @@ Use a restart policy. If the Shelly stops answering for 30 s the emulator exits 
 - `SHELLY_MODBUS=ip:port`: reads the Shelly over Modbus TCP. Fastest, and what the Pro 3EM is best used with.
 - `SHELLY_REST=ip`: reads the Shelly over its HTTP RPC interface, for devices without Modbus. The device type is detected automatically:
   `em:N` components (Pro 3EM, three phases) and `switch:N` components (Pro 1PM and other relays with power metering, reported as one phase).
+  Gen1 energy meters (Shelly 3EM, Shelly EM) are recognised too, because they have no RPC interface; see [Configuration](docs/configuration.md) for their authentication and frequency settings.
 
-The power is read twice per second (Shelly devices only update at 1Hz, but this reduces latency). Phases, frequency and energy counters are
-refreshed every `SLOW_METER_READ_INTERVAL_S` seconds for Modbus, and with every read for REST.
+The power, the three phases and the frequency are read together twice per second (Shelly devices only update at 1Hz, but this reduces latency),
+so the inverter never gets a new total next to old phase values. Only the energy counters are refreshed every `SLOW_METER_READ_INTERVAL_S` seconds
+for Modbus, and with every read for REST.
 Every Shelly read has a time limit, and a failed read never re-sends an old value.
 See [Configuration](docs/configuration.md) for the details and the list of supported devices.
 
@@ -87,6 +89,9 @@ All options are described in [docs/configuration.md](docs/configuration.md).
 SHELLY_MODBUS # ip:port of the Shelly's Modbus TCP server
 SHELLY_REST # Address of the Shelly for HTTP RPC reads (ip or http://ip), used instead of SHELLY_MODBUS if set
 SHELLY_ID # Component id for SHELLY_REST if the device has several (default: lowest; SHELLY_EM_ID is the old name)
+SHELLY_USER # User for HTTP basic authentication of a Gen1 Shelly (default admin, only used with SHELLY_PASSWORD)
+SHELLY_PASSWORD # Password for HTTP basic authentication of a Gen1 Shelly (default: none)
+SHELLY_FREQUENCY # Grid frequency in Hz reported for devices that can't measure it, i.e. Gen1 (default 50)
 SHELLY_INVERT # Flip the direction of power flow (true/false)
 SHELLY_POLL_INTERVAL_MS # Interval between power readings in ms (default 500, minimum 100)
 SLOW_METER_READ_INTERVAL_S # Interval in seconds between slow meter reads (default 60)
