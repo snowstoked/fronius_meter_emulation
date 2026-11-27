@@ -206,8 +206,10 @@ fn merge_u16_f32(low: u16, high: u16) -> f32 {
 }
 
 fn decode_floats(regs: &[u16]) -> Vec<f32> {
-    regs.chunks_exact(2)
-        .map(|chunk| merge_u16_f32(chunk[0], chunk[1]))
+    regs.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[low, high]| merge_u16_f32(low, high))
         .collect()
 }
 
